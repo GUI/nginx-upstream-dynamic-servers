@@ -1,0 +1,8 @@
+dependencies:
+  cache_directories:
+    - "t/build"
+    - "t/tmp"
+test:
+  override:
+    - make test
+    - make grind

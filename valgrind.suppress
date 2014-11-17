@@ -1,0 +1,48 @@
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Leak
+   fun:malloc
+   fun:ngx_alloc
+   fun:ngx_event_process_init
+   fun:ngx_single_process_cycle
+   fun:main
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Cond
+   obj:*
+   obj:*
+   fun:lua_tolstring
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Cond
+   obj:*
+   fun:lua_pushlstring
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Addr4
+   obj:*
+   fun:lua_pushlstring
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Addr4
+   obj:*
+   fun:lua_setfield
+}
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Addr4
+   obj:*
+   fun:lua_getfield
+}
+
+# In nginx 1.7.5+ there's a known leak with the resolver running in debug mode.
+# See: http://forum.nginx.org/read.php?29,253644,253650#msg-253650
+{
+   <insert_a_suppression_name_here>
+   Memcheck:Addr4
+   fun:ngx_resolve_name_done
+}
