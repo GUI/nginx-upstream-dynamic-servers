@@ -20,7 +20,7 @@ test: t/build/lib/perl5 t/build/sbin/unbound t/build/sbin/nginx
 	exit $$STATUS
 
 grind:
-	env TEST_NGINX_USE_VALGRIND=1 $(MAKE) test
+	env TEST_NGINX_USE_VALGRIND=1 TEST_NGINX_SLEEP=5 $(MAKE) test
 
 t/tmp:
 	mkdir -p $@
