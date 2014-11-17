@@ -8,7 +8,9 @@ nginx_url=http://nginx.org/download/$(nginx).tar.gz
 clean:
 	rm -rf t/build t/servroot t/tmp
 
-test: t/build/lib/perl5 t/build/sbin/unbound t/build/sbin/nginx
+prepare: t/build/lib/perl5 t/build/sbin/unbound t/build/sbin/nginx
+
+test: prepare
 	echo "" > /tmp/nginx_upstream_dynamic_servers_unbound_active_test.conf
 	echo "" > /tmp/unbound.log
 	if [ -f $(UNBOUND_PID) ] && ps -p `cat $(UNBOUND_PID)` > /dev/null; then kill -QUIT `cat $(UNBOUND_PID)`; fi
