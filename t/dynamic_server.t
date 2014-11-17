@@ -13,6 +13,8 @@ add_block_preprocessor(sub {
 no_shuffle();
 plan tests => 2 * blocks();
 
+$ENV{TEST_NGINX_RESOLVER} = "127.0.0.1:1982";
+
 $ENV{TEST_NGINX_BASE_HTTP_CONF} = <<_EOC_;
   init_by_lua '
     function set_dns_records(records)
@@ -75,7 +77,7 @@ __DATA__
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server foo.blah;
     }
@@ -92,7 +94,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server use.opendns.com;
     }
@@ -126,7 +128,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server use.opendns.com:8080;
     }
@@ -160,7 +162,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server 10.10.10.10;
     }
@@ -187,7 +189,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server [fe80::0202:b3ff:fe1e:8329];
     }
@@ -214,7 +216,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server [fe80::0202:b3ff:fe1e:8329]:8081;
     }
@@ -270,7 +272,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server use.opendns.com;
     }
@@ -299,7 +301,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server use.opendns.com;
     }
@@ -342,7 +344,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server foo.blah;
     }
@@ -371,7 +373,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server foo.blah;
     }
@@ -402,7 +404,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server use.opendns.com;
     }
@@ -446,7 +448,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server multi.blah;
     }
@@ -477,7 +479,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server use.opendns.com weight=4 max_fails=8 fail_timeout=7;
       dynamic_server 127.0.0.8 backup down;
@@ -496,7 +498,7 @@ upstream test_upstream:
 --- http_config
     $TEST_NGINX_BASE_HTTP_CONF
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       dynamic_server google.blah;
       dynamic_server yahoo.blah;
@@ -603,7 +605,7 @@ upstream test_upstream3:
       }
     }
 
-    resolver 127.0.0.1:1111;
+    resolver $TEST_NGINX_RESOLVER;
     upstream test_upstream {
       keepalive 30;
       dynamic_server local.blah:1983;
