@@ -13,7 +13,7 @@ test: t/build/lib/perl5 t/build/sbin/unbound t/build/sbin/nginx
 	echo "" > /tmp/unbound.log
 	if [ -f $(UNBOUND_PID) ] && ps -p `cat $(UNBOUND_PID)` > /dev/null; then kill -QUIT `cat $(UNBOUND_PID)`; fi
 	sleep 0.2
-	env PATH=$(PATH) unbound -c $(PWD)/t/unbound/unbound.conf -vvv > $(PWD)/t/tmp/unbound.log 2>&1
+	env PATH=$(PATH) unbound -c $(PWD)/t/unbound/unbound.conf -vvv
 	env PATH=$(PATH) PERL5LIB=$(PERL5LIB) UNBOUND_PID=$(UNBOUND_PID) LD_LIBRARY_PATH=$(PWD)/t/build/lib:$(LD_LIBRARY_PATH) prove
 	STATUS=$$?
 	if [ -f $(UNBOUND_PID) ] && ps -p `cat $(UNBOUND_PID)` > /dev/null; then kill -QUIT `cat $(UNBOUND_PID)`; fi
