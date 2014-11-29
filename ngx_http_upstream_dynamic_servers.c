@@ -5,6 +5,7 @@
 
 typedef struct {
   ngx_pool_t *pool;
+  ngx_pool_t *previous_pool;
   ngx_http_upstream_server_t *server;
   ngx_http_upstream_srv_conf_t *upstream_conf;
   ngx_resolver_t *resolver;
@@ -243,12 +244,6 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
     dynamic_server->resolved->host = u.host;
     dynamic_server->resolved->port = (in_port_t) (u.no_port ? u.default_port : u.port);
     dynamic_server->resolved->no_port = u.no_port;
-
-
-    dynamic_server->pool = ngx_create_pool(512, cf->log);
-    if(dynamic_server->pool == NULL) {
-      return NGX_CONF_ERROR;
-    }
   }
   // END CUSTOMIZATION
 
@@ -364,6 +359,7 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
   ngx_conf_t cf;
   uint32_t hash;
   ngx_resolver_node_t  *rn;
+  ngx_pool_t *new_pool;
   dynamic_server = ctx->data;
 
   ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dyanmic-servers: Finished resolving '%V'", &ctx->name);
@@ -374,11 +370,14 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
     ngx_url_t                    u;
     ngx_memzero(&u, sizeof(ngx_url_t));
 
+    // If the domain fails to resolve on start up, assign a static IP that
+    // should never route (we'll also mark it as down in the upstream later
+    // on). This is to account for various things inside nginx that seem to
+    // expect a server to always have at least 1 IP.
     u.url = ngx_http_upstream_dynamic_server_null_route;
     u.default_port = 80;
     u.no_resolve = 1;
-
-    if(ngx_parse_url(dynamic_server->pool, &u) != NGX_OK) {
+    if(ngx_parse_url(ngx_cycle->pool, &u) != NGX_OK) {
       if(u.err) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0,
             "%s in upstream \"%V\"", u.err, &u.url);
@@ -386,7 +385,6 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
 
       goto end;
     }
-
     ctx->addrs = u.addrs;
     ctx->naddrs = u.naddrs;
   }
@@ -412,11 +410,17 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
 
 reinit_upstream:
 
+  new_pool = ngx_create_pool(NGX_DEFAULT_POOL_SIZE, ctx->resolver->log);
+  if(new_pool == NULL) {
+    ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dyanmic-servers: Could not create new pool");
+    return;
+  }
+
   ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dyanmic-servers: DNS changes for '%V' detected - reinitializing upstream configuration", &ctx->name);
 
   ngx_memzero(&cf, sizeof(ngx_conf_t));
   cf.name = "dynamic_server_init_upstream";
-  cf.pool = dynamic_server->pool;
+  cf.pool = new_pool;
   cf.module_type = NGX_HTTP_MODULE;
   cf.cmd_type = NGX_HTTP_MAIN_CONF;
   cf.log = ngx_cycle->log;
@@ -424,13 +428,14 @@ reinit_upstream:
 
   dynamic_server->server->naddrs = ctx->naddrs;
 
+  // If the domain failed to resolve, mark this server as down.
   if(ctx->state) {
     dynamic_server->server->down = 1;
   } else {
     dynamic_server->server->down = 0;
   }
 
-  dynamic_server->server->addrs = ngx_pcalloc(ngx_cycle->pool, ctx->naddrs * sizeof(ngx_addr_t));
+  dynamic_server->server->addrs = ngx_pcalloc(new_pool, ctx->naddrs * sizeof(ngx_addr_t));
   ngx_memcpy(dynamic_server->server->addrs, ctx->addrs, ctx->naddrs * sizeof(ngx_addr_t));
 
   struct sockaddr *sockaddr;
@@ -441,7 +446,7 @@ reinit_upstream:
 
     socklen = ctx->addrs[i].socklen;
 
-    sockaddr = ngx_palloc(ngx_cycle->pool, socklen);
+    sockaddr = ngx_palloc(new_pool, socklen);
     ngx_memcpy(sockaddr, ctx->addrs[i].sockaddr, socklen);
     switch(sockaddr->sa_family) {
     case AF_INET6:
@@ -457,7 +462,7 @@ reinit_upstream:
     u_char *p;
     size_t len;
 
-    p = ngx_pnalloc(ngx_cycle->pool, NGX_SOCKADDR_STRLEN);
+    p = ngx_pnalloc(new_pool, NGX_SOCKADDR_STRLEN);
     if(p == NULL) {
       ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dyanmic-servers: Error initializing sockaddr");
     }
@@ -485,6 +490,14 @@ reinit_upstream:
   if(init(&cf, dynamic_server->upstream_conf) != NGX_OK) {
     ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dyanmic-servers: Error re-initializing upstream after DNS changes");
   }
+
+  if(dynamic_server->previous_pool != NULL) {
+    ngx_destroy_pool(dynamic_server->previous_pool);
+    dynamic_server->previous_pool = NULL;
+  }
+
+  dynamic_server->previous_pool = dynamic_server->pool;
+  dynamic_server->pool = new_pool;
 
 end:
 
