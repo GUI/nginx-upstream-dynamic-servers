@@ -1,4 +1,4 @@
-# nginx-upstream-dyanmic-servers
+# nginx-upstream-dynamic-servers
 
 An nginx module to resolve domain names inside upstreams and keep them up to date.
 
@@ -62,4 +62,4 @@ Tested with nginx 1.7.7.
 
 ## License
 
-nginx-upstream-dyanmic-servers is open sourced under the [MIT license](https://github.com/GUI/nginx-upstream-dyanmic-servers/blob/master/LICENSE.txt).
+nginx-upstream-dynamic-servers is open sourced under the [MIT license](https://github.com/GUI/nginx-upstream-dynamic-servers/blob/master/LICENSE.txt).
