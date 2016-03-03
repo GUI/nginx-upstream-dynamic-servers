@@ -543,6 +543,11 @@ end:
   ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Refreshing DNS of '%V' in %ims", &ctx->name, refresh_in);
   ngx_resolve_name_done(ctx);
 
+  if (ngx_exiting) {
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: worker is about to exit, do not set the timer again");
+    return;
+  }
+
   ngx_event_t *timer;
   timer = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_event_t));
 
