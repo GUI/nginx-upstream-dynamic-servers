@@ -3,6 +3,10 @@
 #include <ngx_http.h>
 #include <nginx.h>
 
+#define ngx_resolver_node(n)                                                 \
+    (ngx_resolver_node_t *)                                                  \
+        ((u_char *) (n) - offsetof(ngx_resolver_node_t, node))
+
 typedef struct {
   ngx_pool_t *pool;
   ngx_pool_t *previous_pool;
@@ -548,7 +552,7 @@ static ngx_resolver_node_t * ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str
 
     /* hash == node->key */
 
-    rn = (ngx_resolver_node_t *) node;
+    rn = ngx_resolver_node(node);
 
     rc = ngx_memn2cmp(name->data, rn->name, name->len, rn->nlen);
 
