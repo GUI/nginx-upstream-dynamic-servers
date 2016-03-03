@@ -15,6 +15,7 @@ typedef struct {
   ngx_resolver_t *resolver;
   ngx_msec_t resolver_timeout;
   ngx_http_upstream_resolved_t *resolved;
+  ngx_event_t timer;
 } ngx_http_upstream_dynamic_server_conf_t;
 
 typedef struct {
@@ -322,7 +323,7 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
       dynamic_server[i].resolver = core_loc_conf->resolver;
       ngx_conf_merge_msec_value(dynamic_server[i].resolver_timeout, core_loc_conf->resolver_timeout, 30000);
 
-      timer = ngx_pcalloc(cycle->pool, sizeof(ngx_event_t));
+      timer = &dynamic_server[i].timer;
       timer->handler = ngx_http_upstream_dynamic_server_resolve;
       timer->log = cycle->log;
       timer->data = &dynamic_server[i];
@@ -548,13 +549,7 @@ end:
     return;
   }
 
-  ngx_event_t *timer;
-  timer = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_event_t));
-
-  timer->handler = ngx_http_upstream_dynamic_server_resolve;
-  timer->log = ngx_cycle->log;
-  timer->data = dynamic_server;
-  ngx_add_timer(timer, 1000);
+  ngx_add_timer(&dynamic_server->timer, 1000);
 }
 
 // Copied from src/core/ngx_resolver.c (nginx version 1.7.7).
