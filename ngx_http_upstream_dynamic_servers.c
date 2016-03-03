@@ -17,8 +17,13 @@ typedef struct {
   ngx_http_upstream_resolved_t *resolved;
 } ngx_http_upstream_dynamic_server_conf_t;
 
+typedef struct {
+    ngx_array_t                      dynamic_servers;
+} ngx_http_upstream_dynamic_server_main_conf_t;
+
 static ngx_str_t ngx_http_upstream_dynamic_server_null_route = ngx_string("127.255.255.255");
-static ngx_array_t *ngx_http_upstream_dynamic_servers;
+
+static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf);
 
 static char *ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child);
@@ -45,7 +50,7 @@ static ngx_http_module_t ngx_http_upstream_dynamic_servers_module_ctx = {
   NULL,                                         /* preconfiguration */
   NULL,                                         /* postconfiguration */
 
-  NULL,                                         /* create main configuration */
+  ngx_http_upstream_dynamic_server_main_conf,   /* create main configuration */
   NULL,                                         /* init main configuration */
 
   NULL,                                         /* create server configuration */
@@ -78,9 +83,7 @@ ngx_module_t ngx_http_upstream_dynamic_servers_module = {
 static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy) {
   // BEGIN CUSTOMIZATION: "dynamic_server" differs from "server" implementation
   ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
-  if(ngx_http_upstream_dynamic_servers == NULL) {
-    ngx_http_upstream_dynamic_servers = ngx_array_create(cf->pool, 1, sizeof(ngx_http_upstream_dynamic_server_conf_t));
-  }
+  ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_dynamic_servers_module);
 
   ngx_http_upstream_srv_conf_t *uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
   // END CUSTOMIZATION
@@ -231,7 +234,7 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
   u.no_resolve = 1;
   ngx_parse_url(cf->pool, &u);
   if(!u.addrs || !u.addrs[0].sockaddr) {
-    dynamic_server = ngx_array_push(ngx_http_upstream_dynamic_servers);
+    dynamic_server = ngx_array_push(&udsmcf->dynamic_servers);
     if(dynamic_server == NULL) {
       return NGX_CONF_ERROR;
     }
@@ -248,6 +251,7 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
     dynamic_server->resolved->host = u.host;
     dynamic_server->resolved->port = (in_port_t) (u.no_port ? u.default_port : u.port);
     dynamic_server->resolved->no_port = u.no_port;
+    dynamic_server->resolver_timeout = NGX_CONF_UNSET_MSEC;
   }
   // END CUSTOMIZATION
 
@@ -269,10 +273,27 @@ not_supported:
   return NGX_CONF_ERROR;
 }
 
+static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
+    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf;
+
+    udsmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_dynamic_server_main_conf_t));
+    if (udsmcf == NULL) {
+        return NULL;
+    }
+
+    if (ngx_array_init(&udsmcf->dynamic_servers, cf->pool, 1, sizeof(ngx_http_upstream_dynamic_server_conf_t)) != NGX_OK) {
+        return NULL;
+    }
+
+    return udsmcf;
+}
+
 static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child) {
   // If any dynamic servers are present, verify that a "resolver" is setup as
   // the http level.
-  if(ngx_http_upstream_dynamic_servers != NULL) {
+  ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_dynamic_servers_module);
+
+  if(udsmcf->dynamic_servers.nelts > 0) {
     ngx_http_core_loc_conf_t *core_loc_conf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
     if(core_loc_conf->resolver == NULL || core_loc_conf->resolver->udp_connections.nelts == 0) {
       ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "resolver must be defined at the 'http' level of the config");
@@ -290,16 +311,16 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
   ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
   ngx_event_t *timer;
   ngx_uint_t refresh_in;
+  ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
 
   conf_ctx = ((ngx_http_conf_ctx_t *) cycle->conf_ctx[ngx_http_module.index]);
   core_loc_conf = conf_ctx->loc_conf[ngx_http_core_module.ctx_index];
 
-  if(ngx_http_upstream_dynamic_servers != NULL && ngx_http_upstream_dynamic_servers->elts != NULL) {
-    dynamic_server = ngx_http_upstream_dynamic_servers->elts;
-    for(i = 0; i < ngx_http_upstream_dynamic_servers->nelts; i++) {
+  if(udsmcf->dynamic_servers.nelts > 0) {
+    dynamic_server = udsmcf->dynamic_servers.elts;
+    for(i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
       dynamic_server[i].resolver = core_loc_conf->resolver;
-      dynamic_server[i].resolver_timeout = core_loc_conf->resolver_timeout;
-      ngx_conf_init_msec_value(dynamic_server[i].resolver_timeout, 30000);
+      ngx_conf_merge_msec_value(dynamic_server[i].resolver_timeout, core_loc_conf->resolver_timeout, 30000);
 
       timer = ngx_pcalloc(cycle->pool, sizeof(ngx_event_t));
       timer->handler = ngx_http_upstream_dynamic_server_resolve;
@@ -318,10 +339,11 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
 static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
   ngx_uint_t i;
   ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
+  ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
 
-  if(ngx_http_upstream_dynamic_servers != NULL && ngx_http_upstream_dynamic_servers->elts != NULL) {
-    dynamic_server = ngx_http_upstream_dynamic_servers->elts;
-    for(i = 0; i < ngx_http_upstream_dynamic_servers->nelts; i++) {
+  if(udsmcf->dynamic_servers.nelts > 0) {
+    dynamic_server = udsmcf->dynamic_servers.elts;
+    for(i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
       if(dynamic_server[i].pool) {
         ngx_destroy_pool(dynamic_server[i].pool);
         dynamic_server[i].pool = NULL;
