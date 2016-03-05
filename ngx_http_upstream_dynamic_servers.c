@@ -96,6 +96,16 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
   ngx_uint_t                   i;
   ngx_http_upstream_server_t  *us;
 
+#if nginx_version <= 1007002
+  if (uscf->servers == NULL) {
+      uscf->servers = ngx_array_create(cf->pool, 4,
+                                       sizeof(ngx_http_upstream_server_t));
+      if (uscf->servers == NULL) {
+          return NGX_CONF_ERROR;
+      }
+  }
+#endif
+
   us = ngx_array_push(uscf->servers);
   if (us == NULL) {
     return NGX_CONF_ERROR;
@@ -217,7 +227,9 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
   }
   // END CUSTOMIZATION
 
+#if nginx_version >= 1007002
   us->name = u.url;
+#endif
   us->addrs = u.addrs;
   us->naddrs = u.naddrs;
   us->weight = weight;
@@ -296,7 +308,11 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
 
   if(udsmcf->dynamic_servers.nelts > 0) {
     ngx_http_core_loc_conf_t *core_loc_conf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+#if nginx_version >= 1009011
+    if(core_loc_conf->resolver == NULL || core_loc_conf->resolver->connections.nelts == 0) {
+#else
     if(core_loc_conf->resolver == NULL || core_loc_conf->resolver->udp_connections.nelts == 0) {
+#endif
       ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "resolver must be defined at the 'http' level of the config");
       return NGX_CONF_ERROR;
     }
