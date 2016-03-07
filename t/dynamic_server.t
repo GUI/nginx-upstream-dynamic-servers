@@ -35,6 +35,7 @@ $ENV{TEST_NGINX_PRINT_UPSTREAMS_LOCATION} = <<_EOC_;
       local upstream = require "ngx.upstream"
       local get_servers = upstream.get_servers
       local get_upstreams = upstream.get_upstreams
+      local srv_keys={"addr","weight","fail_timeout","backup","down","max_fails"}
 
       local us = get_upstreams()
       for _, u in ipairs(us) do
@@ -45,18 +46,21 @@ $ENV{TEST_NGINX_PRINT_UPSTREAMS_LOCATION} = <<_EOC_;
         else
           for _, srv in ipairs(srvs) do
             local first = true
-            for k, v in pairs(srv) do
-              if first then
-                first = false
-                ngx.print("  ")
-              else
-                ngx.print(", ")
-              end
-              if type(v) == "table" then
-                table.sort(v)
-                ngx.print(k, " = {", concat(v, ", "), "}")
-              else
-                ngx.print(k, " = ", v)
+            for _, k in ipairs(srv_keys) do
+              local v = srv[k]
+              if v then
+                if first then
+                  first = false
+                  ngx.print("  ")
+                else
+                  ngx.print(", ")
+                end
+                if type(v) == "table" then
+                  table.sort(v)
+                  ngx.print(k, " = {", concat(v, ", "), "}")
+                else
+                  ngx.print(k, " = ", v)
+                end
               end
             end
             ngx.print("\\\\n")
