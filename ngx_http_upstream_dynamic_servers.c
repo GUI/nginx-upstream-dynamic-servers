@@ -12,14 +12,14 @@ typedef struct {
     ngx_pool_t                   *previous_pool;
     ngx_http_upstream_server_t   *server;
     ngx_http_upstream_srv_conf_t *upstream_conf;
-    ngx_resolver_t               *resolver;
-    ngx_msec_t                    resolver_timeout;
     ngx_str_t                     host;
     in_port_t                     port;
     ngx_event_t                   timer;
 } ngx_http_upstream_dynamic_server_conf_t;
 
 typedef struct {
+    ngx_resolver_t               *resolver;
+    ngx_msec_t                    resolver_timeout;
     ngx_array_t                   dynamic_servers;
 } ngx_http_upstream_dynamic_server_main_conf_t;
 
@@ -260,7 +260,6 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
 
         dynamic_server->host = u.host;
         dynamic_server->port = (in_port_t) (u.no_port ? u.default_port : u.port);
-        dynamic_server->resolver_timeout = NGX_CONF_UNSET_MSEC;
     }
     // END CUSTOMIZATION
 
@@ -294,6 +293,8 @@ static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
         return NULL;
     }
 
+    udsmcf->resolver_timeout = NGX_CONF_UNSET_MSEC;
+
     return udsmcf;
 }
 
@@ -312,29 +313,23 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
             ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "resolver must be defined at the 'http' level of the config");
             return NGX_CONF_ERROR;
         }
+        udsmcf->resolver = core_loc_conf->resolver;
+        ngx_conf_merge_msec_value(udsmcf->resolver_timeout, core_loc_conf->resolver_timeout, 30000);
     }
 
     return NGX_CONF_OK;
 }
 
 static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
-    ngx_http_conf_ctx_t *conf_ctx;
-    ngx_http_core_loc_conf_t *core_loc_conf;
     ngx_uint_t i;
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_event_t *timer;
     ngx_uint_t refresh_in;
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
 
-    conf_ctx = ((ngx_http_conf_ctx_t *) cycle->conf_ctx[ngx_http_module.index]);
-    core_loc_conf = conf_ctx->loc_conf[ngx_http_core_module.ctx_index];
-
     if (udsmcf->dynamic_servers.nelts > 0) {
         dynamic_server = udsmcf->dynamic_servers.elts;
         for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-            dynamic_server[i].resolver = core_loc_conf->resolver;
-            ngx_conf_merge_msec_value(dynamic_server[i].resolver_timeout, core_loc_conf->resolver_timeout, 30000);
-
             timer = &dynamic_server[i].timer;
             timer->handler = ngx_http_upstream_dynamic_server_resolve;
             timer->log = cycle->log;
@@ -366,12 +361,13 @@ static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
 }
 
 static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
+    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_resolver_ctx_t *ctx;
 
     dynamic_server = ev->data;
 
-    ctx = ngx_resolve_start(dynamic_server->resolver, NULL);
+    ctx = ngx_resolve_start(udsmcf->resolver, NULL);
     if (ctx == NULL) {
         ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: resolver start error for '%V'", &dynamic_server->host);
         return;
@@ -385,7 +381,7 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     ctx->name = dynamic_server->host;
     ctx->handler = ngx_http_upstream_dynamic_server_resolve_handler;
     ctx->data = dynamic_server;
-    ctx->timeout = dynamic_server->resolver_timeout;
+    ctx->timeout = udsmcf->resolver_timeout;
 
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ev->log, 0, "upstream-dynamic-servers: Resolving '%V'", &ctx->name);
     if (ngx_resolve_name(ctx) != NGX_OK) {
