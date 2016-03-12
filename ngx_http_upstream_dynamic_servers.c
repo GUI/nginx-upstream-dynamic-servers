@@ -321,41 +321,35 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
 }
 
 static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
+    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
+    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
-    ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_event_t *timer;
     ngx_uint_t refresh_in;
-    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
 
-    if (udsmcf->dynamic_servers.nelts > 0) {
-        dynamic_server = udsmcf->dynamic_servers.elts;
-        for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-            timer = &dynamic_server[i].timer;
-            timer->handler = ngx_http_upstream_dynamic_server_resolve;
-            timer->log = cycle->log;
-            timer->data = &dynamic_server[i];
+    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
+        timer = &dynamic_server[i].timer;
+        timer->handler = ngx_http_upstream_dynamic_server_resolve;
+        timer->log = cycle->log;
+        timer->data = &dynamic_server[i];
 
-            refresh_in = ngx_random() % 1000;
-            ngx_log_debug(NGX_LOG_DEBUG_CORE, cycle->log, 0, "upstream-dynamic-servers: Initial DNS refresh of '%V' in %ims", &dynamic_server[i].host, refresh_in);
-            ngx_add_timer(timer, refresh_in);
-        }
+        refresh_in = ngx_random() % 1000;
+        ngx_log_debug(NGX_LOG_DEBUG_CORE, cycle->log, 0, "upstream-dynamic-servers: Initial DNS refresh of '%V' in %ims", &dynamic_server[i].host, refresh_in);
+        ngx_add_timer(timer, refresh_in);
     }
 
     return NGX_OK;
 }
 
 static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
-    ngx_uint_t i;
-    ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
+    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
+    ngx_uint_t i;
 
-    if (udsmcf->dynamic_servers.nelts > 0) {
-        dynamic_server = udsmcf->dynamic_servers.elts;
-        for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-            if (dynamic_server[i].pool) {
-                ngx_destroy_pool(dynamic_server[i].pool);
-                dynamic_server[i].pool = NULL;
-            }
+    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
+        if (dynamic_server[i].pool) {
+            ngx_destroy_pool(dynamic_server[i].pool);
+            dynamic_server[i].pool = NULL;
         }
     }
 }
