@@ -557,7 +557,7 @@ end:
     ngx_resolve_name_done(ctx);
 
     if (ngx_exiting) {
-        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: worker is about to exit, do not set the timer again");
+        ngx_log_debug(NGX_LOG_DEBUG_CORE, ngx_cycle->log, 0, "upstream-dynamic-servers: worker is about to exit, do not set the timer again");
         return;
     }
 
