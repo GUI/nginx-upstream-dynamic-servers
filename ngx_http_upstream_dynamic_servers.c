@@ -14,7 +14,8 @@ typedef struct {
     ngx_http_upstream_srv_conf_t *upstream_conf;
     ngx_resolver_t               *resolver;
     ngx_msec_t                    resolver_timeout;
-    ngx_http_upstream_resolved_t *resolved;
+    ngx_str_t                     host;
+    in_port_t                     port;
     ngx_event_t                   timer;
 } ngx_http_upstream_dynamic_server_conf_t;
 
@@ -257,14 +258,8 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
         dynamic_server->server = us;
         dynamic_server->upstream_conf = uscf;
 
-        dynamic_server->resolved = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_resolved_t));
-        if (dynamic_server->resolved == NULL) {
-            return NGX_CONF_ERROR;
-        }
-
-        dynamic_server->resolved->host = u.host;
-        dynamic_server->resolved->port = (in_port_t) (u.no_port ? u.default_port : u.port);
-        dynamic_server->resolved->no_port = u.no_port;
+        dynamic_server->host = u.host;
+        dynamic_server->port = (in_port_t) (u.no_port ? u.default_port : u.port);
         dynamic_server->resolver_timeout = NGX_CONF_UNSET_MSEC;
     }
     // END CUSTOMIZATION
@@ -346,7 +341,7 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
             timer->data = &dynamic_server[i];
 
             refresh_in = ngx_random() % 1000;
-            ngx_log_debug(NGX_LOG_DEBUG_CORE, cycle->log, 0, "upstream-dynamic-servers: Initial DNS refresh of '%V' in %ims", &dynamic_server[i].resolved->host, refresh_in);
+            ngx_log_debug(NGX_LOG_DEBUG_CORE, cycle->log, 0, "upstream-dynamic-servers: Initial DNS refresh of '%V' in %ims", &dynamic_server[i].host, refresh_in);
             ngx_add_timer(timer, refresh_in);
         }
     }
@@ -378,16 +373,16 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
 
     ctx = ngx_resolve_start(dynamic_server->resolver, NULL);
     if (ctx == NULL) {
-        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: resolver start error for '%V'", &dynamic_server->resolved->host);
+        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: resolver start error for '%V'", &dynamic_server->host);
         return;
     }
 
     if (ctx == NGX_NO_RESOLVER) {
-        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: no resolver defined to resolve '%V'", &dynamic_server->resolved->host);
+        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: no resolver defined to resolve '%V'", &dynamic_server->host);
         return;
     }
 
-    ctx->name = dynamic_server->resolved->host;
+    ctx->name = dynamic_server->host;
     ctx->handler = ngx_http_upstream_dynamic_server_resolve_handler;
     ctx->data = dynamic_server;
     ctx->timeout = dynamic_server->resolver_timeout;
@@ -494,10 +489,10 @@ reinit_upstream:
         ngx_memcpy(sockaddr, ctx->addrs[i].sockaddr, socklen);
         switch(sockaddr->sa_family) {
         case AF_INET6:
-            ((struct sockaddr_in6 *)sockaddr)->sin6_port = htons((u_short) dynamic_server->resolved->port);
+            ((struct sockaddr_in6 *)sockaddr)->sin6_port = htons((u_short) dynamic_server->port);
             break;
         default:
-            ((struct sockaddr_in *)sockaddr)->sin_port = htons((u_short) dynamic_server->resolved->port);
+            ((struct sockaddr_in *)sockaddr)->sin_port = htons((u_short) dynamic_server->port);
         }
 
         addr->sockaddr = sockaddr;
