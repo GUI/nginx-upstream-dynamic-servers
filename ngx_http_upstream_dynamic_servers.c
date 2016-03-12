@@ -389,6 +389,8 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
     uint32_t hash;
     ngx_resolver_node_t  *rn;
     ngx_pool_t *new_pool;
+    ngx_addr_t                      *addrs;
+
     dynamic_server = ctx->data;
 
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Finished resolving '%V'", &ctx->name);
@@ -442,7 +444,7 @@ reinit_upstream:
     new_pool = ngx_create_pool(NGX_DEFAULT_POOL_SIZE, ctx->resolver->log);
     if (new_pool == NULL) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Could not create new pool");
-        return;
+        goto end;
     }
 
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: DNS changes for '%V' detected - reinitializing upstream configuration", &ctx->name);
@@ -455,23 +457,14 @@ reinit_upstream:
     cf.log = ngx_cycle->log;
     cf.ctx = ctx;
 
-    dynamic_server->server->naddrs = ctx->naddrs;
-
-    // If the domain failed to resolve, mark this server as down.
-    if (ctx->state) {
-        dynamic_server->server->down = 1;
-    } else {
-        dynamic_server->server->down = 0;
-    }
-
-    dynamic_server->server->addrs = ngx_pcalloc(new_pool, ctx->naddrs * sizeof(ngx_addr_t));
-    ngx_memcpy(dynamic_server->server->addrs, ctx->addrs, ctx->naddrs * sizeof(ngx_addr_t));
+    addrs = ngx_pcalloc(new_pool, ctx->naddrs * sizeof(ngx_addr_t));
+    ngx_memcpy(addrs, ctx->addrs, ctx->naddrs * sizeof(ngx_addr_t));
 
     struct sockaddr *sockaddr;
     ngx_addr_t *addr;
     socklen_t socklen;
     for (i = 0; i < ctx->naddrs; i++) {
-        addr = &dynamic_server->server->addrs[i];
+        addr = &addrs[i];
 
         socklen = ctx->addrs[i].socklen;
 
@@ -494,24 +487,19 @@ reinit_upstream:
         p = ngx_pnalloc(new_pool, NGX_SOCKADDR_STRLEN);
         if (p == NULL) {
             ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error initializing sockaddr");
+            ngx_destroy_pool(new_pool);
+            goto end;
         }
         len = ngx_sock_ntop(sockaddr, socklen, p, NGX_SOCKADDR_STRLEN, 1);
         addr->name.len = len;
         addr->name.data = p;
+        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: '%V' was resolved to '%V'", &ctx->name, &addr->name);
     }
 
-#if (NGX_DEBUG)
-    {
-        u_char text[NGX_SOCKADDR_STRLEN];
-        ngx_str_t addr;
-        ngx_uint_t i;
-        addr.data = text;
-        for (i = 0; i < ctx->naddrs; i++) {
-            addr.len = ngx_sock_ntop(ctx->addrs[i].sockaddr, ctx->addrs[i].socklen, text, NGX_SOCKADDR_STRLEN, 0);
-            ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: '%V' was resolved to '%V'", &ctx->name, &addr);
-        }
-    }
-#endif
+    // If the domain failed to resolve, mark this server as down.
+    dynamic_server->server->down = ctx->state ? 1 : 0;
+    dynamic_server->server->addrs = addrs;
+    dynamic_server->server->naddrs = ctx->naddrs;
 
     ngx_http_upstream_init_pt init;
     init = dynamic_server->upstream_conf->peer.init_upstream ? dynamic_server->upstream_conf->peer.init_upstream : ngx_http_upstream_init_round_robin;
