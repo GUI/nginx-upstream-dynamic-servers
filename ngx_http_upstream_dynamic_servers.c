@@ -518,20 +518,23 @@ reinit_upstream:
 
 end:
 
-    hash = ngx_crc32_short(ctx->name.data, ctx->name.len);
-    rn = ngx_resolver_lookup_name(ctx->resolver, &ctx->name, hash);
-    uint32_t refresh_in;
-    if (rn != NULL && rn->ttl) {
-        refresh_in = (rn->valid - ngx_time()) * 1000;
+    if (ctx->resolver->log->log_level & NGX_LOG_DEBUG_CORE) {
+        hash = ngx_crc32_short(ctx->name.data, ctx->name.len);
+        rn = ngx_resolver_lookup_name(ctx->resolver, &ctx->name, hash);
+        uint32_t refresh_in;
+        if (rn != NULL && rn->ttl) {
+            refresh_in = (rn->valid - ngx_time()) * 1000;
 
-        if (!refresh_in || refresh_in < 1000) {
+            if (!refresh_in || refresh_in < 1000) {
+                refresh_in = 1000;
+            }
+        } else {
             refresh_in = 1000;
         }
-    } else {
-        refresh_in = 1000;
+
+        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Refreshing DNS of '%V' in %ims", &ctx->name, refresh_in);
     }
 
-    ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Refreshing DNS of '%V' in %ims", &ctx->name, refresh_in);
     ngx_resolve_name_done(ctx);
 
     if (ngx_exiting) {
