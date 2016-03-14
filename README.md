@@ -24,7 +24,7 @@ http {
   resolver 8.8.8.8;
 
   upstream example {
-    dynamic_server example.com;
+    server example.com resolve;
   }
 }
 ```
@@ -33,7 +33,7 @@ http {
 
 ### dynamic_server
 
-**Syntax:** *dynamic_server address [parameters]*;  
+**Syntax:** *server address [parameters]*;
 **Context** *upstream*
 
 Defines a server for an upstream. The differences between the default `server` and `dynamic_server` implementation:
@@ -43,11 +43,12 @@ Defines a server for an upstream. The differences between the default `server` a
 
 The following parameters can be used (see nginx's [server documentation](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#server) for details):
 
-*weight=number*  
-*max_fails=number*  
-*fail_timeout=time*  
-*backup*  
-*down*  
+*weight=number*
+*max_fails=number*
+*fail_timeout=time*
+*backup*
+*down*
+*resolve*
 
 # Compatibility
 
