@@ -12,6 +12,7 @@
 ## [0.2.0] - 2016-03-02
 ### Added
 - Compatibility with nginx 1.8 and 1.7. (Thanks to @wandenberg)
+
 ### Fixed
 - Fix segfault during repeated nginx reloads. (Thanks to @wandenberg)
 
