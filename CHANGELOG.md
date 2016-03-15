@@ -15,6 +15,10 @@
 ### Fixed
 - Fix segfault during repeated nginx reloads. (Thanks to @wandenberg)
 
-## [0.1.0] - 2014-11-29
+## 0.1.0 - 2014-11-29
 ### Added
 - Initial release.
+
+[0.4.0]: https://github.com/GUI/nginx-upstream-dynamic-servers/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/GUI/nginx-upstream-dynamic-servers/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/GUI/nginx-upstream-dynamic-servers/compare/v0.1.0...v0.2.0
