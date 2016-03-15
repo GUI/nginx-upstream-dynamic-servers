@@ -37,7 +37,7 @@ static ngx_resolver_node_t *ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str_
 
 static ngx_command_t ngx_http_upstream_dynamic_servers_commands[] = {
     {
-        ngx_string("dynamic_server"),
+        ngx_string("server"),
         NGX_HTTP_UPS_CONF | NGX_CONF_1MORE,
         ngx_http_upstream_dynamic_server_directive,
         0,
@@ -77,17 +77,16 @@ ngx_module_t ngx_http_upstream_dynamic_servers_module = {
     NGX_MODULE_V1_PADDING
 };
 
-// Implement the "dynamic_server" directive so it's compatible with the nginx
-// default "server" directive. Most of this function is based on the default
+// Overwrite the nginx "server" directive based on its
 // implementation of "ngx_http_upstream_server" from
 // src/http/ngx_http_upstream.c (nginx version 1.7.7), and should be kept in
 // sync with nginx's source code. Customizations noted in comments.
+// This make possible use the same syntax of nginx comercial version.
 static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy) {
-    // BEGIN CUSTOMIZATION: "dynamic_server" differs from "server" implementation
-    ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
+    // BEGIN CUSTOMIZATION: differs from default "server" implementation
+    ngx_http_upstream_srv_conf_t                  *uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_dynamic_servers_module);
-
-    ngx_http_upstream_srv_conf_t *uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
+    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = NULL;
     // END CUSTOMIZATION
 
     time_t                       fail_timeout;
@@ -192,6 +191,35 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
             continue;
         }
 
+        // BEGIN CUSTOMIZATION: differs from default "server" implementation
+        if (ngx_strcmp(value[i].data, "resolve") == 0) {
+            // Determine if the server given is an IP address or a hostname by running
+            // through ngx_parse_url with no_resolve enabled. Only if a hostname is given
+            // will we add this to the list of dynamic servers that we will resolve again.
+
+            ngx_memzero(&u, sizeof(ngx_url_t));
+            u.url = value[1];
+            u.default_port = 80;
+            u.no_resolve = 1;
+            ngx_parse_url(cf->pool, &u);
+            if (!u.addrs || !u.addrs[0].sockaddr) {
+                dynamic_server = ngx_array_push(&udsmcf->dynamic_servers);
+                if (dynamic_server == NULL) {
+                    return NGX_CONF_ERROR;
+                }
+
+                ngx_memzero(dynamic_server, sizeof(ngx_http_upstream_dynamic_server_conf_t));
+                dynamic_server->server = us;
+                dynamic_server->upstream_conf = uscf;
+
+                dynamic_server->host = u.host;
+                dynamic_server->port = (in_port_t) (u.no_port ? u.default_port : u.port);
+            }
+
+            continue;
+        }
+        // END CUSTOMIZATION
+
         goto invalid;
     }
 
@@ -200,7 +228,7 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
     u.url = value[1];
     u.default_port = 80;
 
-    // BEGIN CUSTOMIZATION: "dynamic_server" differs from "server" implementation
+    // BEGIN CUSTOMIZATION: differs from default "server" implementation
     if (ngx_parse_url(cf->pool, &u) != NGX_OK) {
         if (u.err) {
             ngx_conf_log_error(NGX_LOG_ERR, cf, 0,
@@ -236,32 +264,6 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
     us->weight = weight;
     us->max_fails = max_fails;
     us->fail_timeout = fail_timeout;
-
-    // BEGIN CUSTOMIZATION: "dynamic_server" differs from "server" implementation
-
-    // Determine if the server given is an IP address or a hostname by running
-    // through ngx_parse_url with no_resolve enabled. Only if a hostname is given
-    // will we add this to the list of dynamic servers that we will resolve again.
-
-    ngx_memzero(&u, sizeof(ngx_url_t));
-    u.url = value[1];
-    u.default_port = 80;
-    u.no_resolve = 1;
-    ngx_parse_url(cf->pool, &u);
-    if (!u.addrs || !u.addrs[0].sockaddr) {
-        dynamic_server = ngx_array_push(&udsmcf->dynamic_servers);
-        if (dynamic_server == NULL) {
-            return NGX_CONF_ERROR;
-        }
-
-        ngx_memzero(dynamic_server, sizeof(ngx_http_upstream_dynamic_server_conf_t));
-        dynamic_server->server = us;
-        dynamic_server->upstream_conf = uscf;
-
-        dynamic_server->host = u.host;
-        dynamic_server->port = (in_port_t) (u.no_port ? u.default_port : u.port);
-    }
-    // END CUSTOMIZATION
 
     return NGX_CONF_OK;
 
