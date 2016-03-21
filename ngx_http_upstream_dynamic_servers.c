@@ -21,6 +21,7 @@ typedef struct {
     ngx_resolver_t               *resolver;
     ngx_msec_t                    resolver_timeout;
     ngx_array_t                   dynamic_servers;
+    ngx_http_conf_ctx_t          *conf_ctx;
 } ngx_http_upstream_dynamic_server_main_conf_t;
 
 static ngx_str_t ngx_http_upstream_dynamic_server_null_route = ngx_string("127.255.255.255");
@@ -315,6 +316,7 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
             ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "resolver must be defined at the 'http' level of the config");
             return NGX_CONF_ERROR;
         }
+        udsmcf->conf_ctx = cf->ctx;
         udsmcf->resolver = core_loc_conf->resolver;
         ngx_conf_merge_msec_value(udsmcf->resolver_timeout, core_loc_conf->resolver_timeout, 30000);
     }
@@ -386,6 +388,7 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
 }
 
 static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx) {
+    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_conf_t cf;
     uint32_t hash;
@@ -453,11 +456,12 @@ reinit_upstream:
 
     ngx_memzero(&cf, sizeof(ngx_conf_t));
     cf.name = "dynamic_server_init_upstream";
+    cf.cycle = (ngx_cycle_t *) ngx_cycle;
     cf.pool = new_pool;
     cf.module_type = NGX_HTTP_MODULE;
     cf.cmd_type = NGX_HTTP_MAIN_CONF;
     cf.log = ngx_cycle->log;
-    cf.ctx = ctx;
+    cf.ctx = udsmcf->conf_ctx;
 
     addrs = ngx_pcalloc(new_pool, ctx->naddrs * sizeof(ngx_addr_t));
     ngx_memcpy(addrs, ctx->addrs, ctx->naddrs * sizeof(ngx_addr_t));
