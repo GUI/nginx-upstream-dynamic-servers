@@ -384,6 +384,7 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ev->log, 0, "upstream-dynamic-servers: Resolving '%V'", &ctx->name);
     if (ngx_resolve_name(ctx) != NGX_OK) {
         ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: ngx_resolve_name failed for '%V'", &ctx->name);
+        ngx_add_timer(&dynamic_server->timer, 1000);
     }
 }
 
