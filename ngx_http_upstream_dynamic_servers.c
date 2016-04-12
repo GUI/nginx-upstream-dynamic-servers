@@ -422,7 +422,10 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
 
             goto end;
         }
-        ctx->addrs = u.addrs;
+        ctx->addr.sockaddr = u.addrs[0].sockaddr;
+        ctx->addr.socklen = u.addrs[0].socklen;
+        ctx->addr.name = u.addrs[0].name;
+        ctx->addrs = &ctx->addr;
         ctx->naddrs = u.naddrs;
     }
 
@@ -432,14 +435,12 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
 
     ngx_uint_t i, j, founded;
     ngx_addr_t *existing_addr;
-    ngx_addr_t *new_addr;
     for (i = 0; i < ctx->naddrs; i++) {
         founded = 0;
-        new_addr = &ctx->addrs[i];
 
         for (j = 0; j < ctx->naddrs; j++) {
             existing_addr = &dynamic_server->server->addrs[j];
-            if (ngx_cmp_sockaddr(existing_addr->sockaddr, existing_addr->socklen, new_addr->sockaddr, new_addr->socklen, 0) == NGX_OK) {
+            if (ngx_cmp_sockaddr(existing_addr->sockaddr, existing_addr->socklen, ctx->addrs[i].sockaddr, ctx->addrs[i].socklen, 0) == NGX_OK) {
                 founded = 1;
                 break;
             }
