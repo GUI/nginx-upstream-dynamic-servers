@@ -392,7 +392,7 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_conf_t cf;
-    uint32_t hash;
+    uint32_t hash, refresh_in;
     ngx_resolver_node_t  *rn;
     ngx_pool_t *new_pool;
     ngx_addr_t                      *addrs;
@@ -533,18 +533,15 @@ reinit_upstream:
     dynamic_server->pool = new_pool;
 
 end:
-    uint32_t refresh_in = 1000;
+    refresh_in = 10000;
     if (ctx->resolver->log->log_level & NGX_LOG_DEBUG_CORE) {
         hash = ngx_crc32_short(ctx->name.data, ctx->name.len);
         rn = ngx_resolver_lookup_name(ctx->resolver, &ctx->name, hash);
         if (rn != NULL && rn->ttl) {
-            refresh_in = (rn->valid - ngx_time()) * 1000;
-
-            if (!refresh_in || refresh_in < 1000) {
-                refresh_in = 1000;
+           int32_t  rin = rn->valid - ngx_time();
+            if ( rin > 0) {
+                refresh_in = rin * 1000;
             }
-        } else {
-            refresh_in = 1000;
         }
 
         ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Refreshing DNS of '%V' in %ims", &ctx->name, refresh_in);
