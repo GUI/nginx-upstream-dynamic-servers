@@ -533,11 +533,10 @@ reinit_upstream:
     dynamic_server->pool = new_pool;
 
 end:
-
+    uint32_t refresh_in = 1000;
     if (ctx->resolver->log->log_level & NGX_LOG_DEBUG_CORE) {
         hash = ngx_crc32_short(ctx->name.data, ctx->name.len);
         rn = ngx_resolver_lookup_name(ctx->resolver, &ctx->name, hash);
-        uint32_t refresh_in;
         if (rn != NULL && rn->ttl) {
             refresh_in = (rn->valid - ngx_time()) * 1000;
 
