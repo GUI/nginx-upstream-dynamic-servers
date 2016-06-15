@@ -558,7 +558,7 @@ end:
         return;
     }
 
-    ngx_add_timer(&dynamic_server->timer, 1000);
+    ngx_add_timer(&dynamic_server->timer, refresh_in);
 }
 
 // Copied from src/core/ngx_resolver.c (nginx version 1.7.7).
