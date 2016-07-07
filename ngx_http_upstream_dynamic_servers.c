@@ -16,7 +16,6 @@ typedef struct {
     in_port_t                     port;
     ngx_event_t                   timer;
     ngx_uint_t                    refresh_in;
-    ngx_uint_t                    debug_log;
 } ngx_http_upstream_dynamic_server_conf_t;
 
 typedef struct {
@@ -98,6 +97,8 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
     ngx_int_t                    weight, max_fails;
     ngx_uint_t                   i;
     ngx_http_upstream_server_t  *us;
+    
+   
 
 #if nginx_version <= 1007002
     if (uscf->servers == NULL) {
@@ -195,15 +196,11 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
         }
 
         // BEGIN CUSTOMIZATION: differs from default "server" implementation
-        if ((ngx_strcmp(value[i].data, "resolve") == 0) || (ngx_strncmp(value[i].data, "resolve=", 8) == 0)){
+        if (ngx_strcmp(value[i].data, "resolve") == 0){
             // Determine if the server given is an IP address or a hostname by running
             // through ngx_parse_url with no_resolve enabled. Only if a hostname is given
             // will we add this to the list of dynamic servers that we will resolve again.
-            ngx_uint_t  refresh_in = 10000;
-            if (ngx_strncmp(value[i].data, "resolve=", 8) == 0) {
-               refresh_in = ngx_atoi(&value[i].data[8], value[i].len - 8);
-            }
-
+            
             ngx_memzero(&u, sizeof(ngx_url_t));
             u.url = value[1];
             u.default_port = 80;
@@ -221,21 +218,19 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
 
                 dynamic_server->host = u.host;
                 dynamic_server->port = (in_port_t) (u.no_port ? u.default_port : u.port);
-                dynamic_server->refresh_in = refresh_in;
-                dynamic_server->debug_log = 0;
+                dynamic_server->refresh_in = 1000;
                 
             }
 
             continue;
         }
         
-        if (ngx_strcmp(value[i].data, "debug_log") == 0) {
-            // enable debug log. this must be followed by resolve
-            if (dynamic_server) {
-              dynamic_server->debug_log = 1;
-            }
+        // add support for refresh_interval.this must be followed by resolve
+        if (dynamic_server && (ngx_strncmp(value[i].data, "refresh_interval=", 17) == 0)){
+            dynamic_server->refresh_in = ngx_atoi(&value[i].data[17], value[i].len - 17);
             continue;
         }
+        
         // END CUSTOMIZATION
 
         goto invalid;
@@ -314,7 +309,7 @@ static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
     }
 
     udsmcf->resolver_timeout = NGX_CONF_UNSET_MSEC;
-
+    
     return udsmcf;
 }
 
@@ -398,9 +393,8 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     ctx->data = dynamic_server;
     ctx->timeout = udsmcf->resolver_timeout;
 
-    if(dynamic_server && dynamic_server->debug_log) {
-        ngx_log_debug(NGX_LOG_DEBUG_CORE, ev->log, 0, "upstream-dynamic-servers: Resolving '%V'", &ctx->name);
-    }
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ev->log, 0, "upstream-dynamic-servers: Resolving '%V'", &ctx->name);
+    
     if (ngx_resolve_name(ctx) != NGX_OK) {
         ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: ngx_resolve_name failed for '%V'", &ctx->name);
         ngx_add_timer(&dynamic_server->timer, 1000);
@@ -414,13 +408,12 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
     ngx_resolver_node_t  *rn;
     ngx_pool_t *new_pool;
     ngx_addr_t                      *addrs;
-    ngx_uint_t refresh_in = 10000;
+    ngx_uint_t refresh_in = 1000;
 
     dynamic_server = ctx->data;
 
-    if(dynamic_server && dynamic_server->debug_log) {
-        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Finished resolving '%V'", &ctx->name);
-    }
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Finished resolving '%V'", &ctx->name);
+    
 
     if (ctx->state) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: '%V' could not be resolved (%i: %s)", &ctx->name, ctx->state, ngx_resolver_strerror(ctx->state));
@@ -472,9 +465,8 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
         }
     }
 
-    if(dynamic_server && dynamic_server->debug_log) {
-        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: No DNS changes for '%V' - keeping existing upstream configuration", &ctx->name);
-    }
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: No DNS changes for '%V' - keeping existing upstream configuration", &ctx->name);
+    
     goto end;
 
 reinit_upstream:
@@ -485,9 +477,8 @@ reinit_upstream:
         goto end;
     }
 
-    if(dynamic_server && dynamic_server->debug_log) {
-        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: DNS changes for '%V' detected - reinitializing upstream configuration", &ctx->name);
-    }
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: DNS changes for '%V' detected - reinitializing upstream configuration", &ctx->name);
+    
 
     ngx_memzero(&cf, sizeof(ngx_conf_t));
     cf.name = "dynamic_server_init_upstream";
@@ -534,9 +525,8 @@ reinit_upstream:
         len = ngx_sock_ntop(sockaddr, socklen, p, NGX_SOCKADDR_STRLEN, 1);
         addr->name.len = len;
         addr->name.data = p;
-        if(dynamic_server && dynamic_server->debug_log) {
-            ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: '%V' was resolved to '%V'", &ctx->name, &addr->name);
-        }
+        ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: '%V' was resolved to '%V'", &ctx->name, &addr->name);
+        
     }
 
     // If the domain failed to resolve, mark this server as down.
@@ -573,9 +563,8 @@ end:
             }
         }
 
-       if(dynamic_server && dynamic_server->debug_log) {
-           ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Refreshing DNS of '%V' in %ims", &ctx->name, refresh_in);
-       }
+       ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Refreshing DNS of '%V' in %ims", &ctx->name, refresh_in);
+       
     }
 
     ngx_resolve_name_done(ctx);
