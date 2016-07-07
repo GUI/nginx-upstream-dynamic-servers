@@ -4,6 +4,8 @@ An nginx module to resolve domain names inside upstreams and keep them up to dat
 
 By default, servers defined in nginx upstreams are only resolved when nginx starts. This module provides an additional `resolve` parameter for `server` definitions that can be used to asynchronously resolve upstream domain names. This keeps the upstream definition up to date according to the DNS TTL of each domain names. This can be useful if you want to use upstreams for dynamic types of domain names that may frequently change IP addresses.
 
+In addition to `resolve`, it allow optional `refresh_interval` to modify default value of 1000 (1s).
+
 This module also allows nginx to start if an upstream contains a defunct domain name that no longer resolves. By default, nginx will fail to start if an upstream server contains an unresolvable domain name. With this module, nginx is still allowed to start with invalid domain names, but an error will be logged and the unresolvable domain names will be marked as down.
 
 ## Installation
@@ -24,7 +26,7 @@ http {
   resolver 8.8.8.8;
 
   upstream example {
-    server example.com resolve;
+    server example.com resolve refresh_interval=1000;
   }
 }
 ```
@@ -49,6 +51,7 @@ The following parameters can be used (see nginx's [server documentation](http://
 `backup`  
 `down`  
 `resolve`  
+`refresh_interval`
 
 # Compatibility
 
