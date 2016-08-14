@@ -8,8 +8,6 @@
         ((u_char *) (n) - offsetof(ngx_resolver_node_t, node))
 
 typedef struct {
-    ngx_pool_t                   *pool;
-    ngx_pool_t                   *previous_pool;
     ngx_http_upstream_server_t   *server;
     ngx_http_upstream_srv_conf_t *upstream_conf;
     ngx_str_t                     host;
@@ -346,16 +344,6 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
 }
 
 static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
-    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
-    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
-    ngx_uint_t i;
-
-    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-        if (dynamic_server[i].pool) {
-            ngx_destroy_pool(dynamic_server[i].pool);
-            dynamic_server[i].pool = NULL;
-        }
-    }
 }
 
 static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
@@ -394,7 +382,6 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
     ngx_conf_t cf;
     uint32_t hash;
     ngx_resolver_node_t  *rn;
-    ngx_pool_t *new_pool;
     ngx_addr_t                      *addrs;
 
     dynamic_server = ctx->data;
@@ -456,24 +443,18 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
 
 reinit_upstream:
 
-    new_pool = ngx_create_pool(NGX_DEFAULT_POOL_SIZE, ctx->resolver->log);
-    if (new_pool == NULL) {
-        ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Could not create new pool");
-        goto end;
-    }
-
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: DNS changes for '%V' detected - reinitializing upstream configuration", &ctx->name);
 
     ngx_memzero(&cf, sizeof(ngx_conf_t));
     cf.name = "dynamic_server_init_upstream";
     cf.cycle = (ngx_cycle_t *) ngx_cycle;
-    cf.pool = new_pool;
+    cf.pool = cf.temp_pool = ngx_cycle->pool;
     cf.module_type = NGX_HTTP_MODULE;
     cf.cmd_type = NGX_HTTP_MAIN_CONF;
     cf.log = ngx_cycle->log;
     cf.ctx = udsmcf->conf_ctx;
 
-    addrs = ngx_pcalloc(new_pool, ctx->naddrs * sizeof(ngx_addr_t));
+    addrs = ngx_pcalloc(cf.pool, ctx->naddrs * sizeof(ngx_addr_t));
     ngx_memcpy(addrs, ctx->addrs, ctx->naddrs * sizeof(ngx_addr_t));
 
     struct sockaddr *sockaddr;
@@ -484,7 +465,7 @@ reinit_upstream:
 
         socklen = ctx->addrs[i].socklen;
 
-        sockaddr = ngx_palloc(new_pool, socklen);
+        sockaddr = ngx_palloc(cf.pool, socklen);
         ngx_memcpy(sockaddr, ctx->addrs[i].sockaddr, socklen);
         switch(sockaddr->sa_family) {
         case AF_INET6:
@@ -500,10 +481,9 @@ reinit_upstream:
         u_char *p;
         size_t len;
 
-        p = ngx_pnalloc(new_pool, NGX_SOCKADDR_STRLEN);
+        p = ngx_pnalloc(cf.pool, NGX_SOCKADDR_STRLEN);
         if (p == NULL) {
             ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error initializing sockaddr");
-            ngx_destroy_pool(new_pool);
             goto end;
         }
         len = ngx_sock_ntop(sockaddr, socklen, p, NGX_SOCKADDR_STRLEN, 1);
@@ -523,14 +503,6 @@ reinit_upstream:
     if (init(&cf, dynamic_server->upstream_conf) != NGX_OK) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error re-initializing upstream after DNS changes");
     }
-
-    if (dynamic_server->previous_pool != NULL) {
-        ngx_destroy_pool(dynamic_server->previous_pool);
-        dynamic_server->previous_pool = NULL;
-    }
-
-    dynamic_server->previous_pool = dynamic_server->pool;
-    dynamic_server->pool = new_pool;
 
 end:
 
