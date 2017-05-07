@@ -4,10 +4,10 @@ export UNBOUND_PID := $(PWD)/t/build/etc/unbound/unbound.pid
 
 unbound_version=1.4.22
 lua_jit_version=2.0.3
-lua_nginx_module_version=0.9.13rc1
+lua_nginx_module_version=0.10.8
 lua_upstream_nginx_module_version=0.02
-nginx_version=1.7.7
-nginx_no_pool_version?=$(nginx_version)
+nginx_version=1.10.0
+nginx_no_pool_version=1.9.15
 nginx_url=http://nginx.org/download/nginx-$(nginx_version).tar.gz
 
 clean:
@@ -40,7 +40,7 @@ t/tmp/cpanm: | t/tmp
 
 t/build/lib/perl5: t/tmp/cpanm
 	$< -L t/build --notest LWP::Protocol::https
-	$< -L t/build --notest https://github.com/openresty/test-nginx/archive/8d5c8668364251cdae01ccf1ef933d80b642982d.tar.gz
+	$< -L t/build --notest https://github.com/openresty/test-nginx/archive/ddb1b46b2757382fc5b311c1874d1e9306fc6f59.tar.gz
 	touch $@
 
 t/tmp/unbound-$(unbound_version).tar.gz: | t/tmp
