@@ -9,13 +9,20 @@
 
 typedef struct {
     ngx_pool_t                   *pool;
-    ngx_pool_t                   *previous_pool;
     ngx_http_upstream_server_t   *server;
     ngx_http_upstream_srv_conf_t *upstream_conf;
     ngx_str_t                     host;
     in_port_t                     port;
     ngx_event_t                   timer;
+    ngx_queue_t                   pools;
 } ngx_http_upstream_dynamic_server_conf_t;
+
+typedef struct {
+    ngx_queue_t                   queue;
+    ngx_pool_t                   *pool;
+    ngx_addr_t                   *addrs;
+    ngx_uint_t                    naddrs;
+} ngx_http_upstream_dynamic_server_info_t;
 
 typedef struct {
     ngx_resolver_t               *resolver;
@@ -23,6 +30,17 @@ typedef struct {
     ngx_array_t                   dynamic_servers;
     ngx_http_conf_ctx_t          *conf_ctx;
 } ngx_http_upstream_dynamic_server_main_conf_t;
+
+typedef struct {
+    ngx_http_upstream_srv_conf_t   *upstream_srv_conf;
+
+    ngx_http_upstream_t            *upstream;
+
+    void                           *data;
+
+    ngx_event_get_peer_pt           original_get_peer;
+    ngx_event_free_peer_pt          original_free_peer;
+} ngx_http_upstream_dynamic_server_peer_data_t;
 
 static ngx_str_t ngx_http_upstream_dynamic_server_null_route = ngx_string("127.255.255.255");
 
@@ -35,6 +53,10 @@ static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle);
 static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev);
 static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx);
 static ngx_resolver_node_t *ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str_t *name, uint32_t hash);
+static ngx_int_t ngx_http_upstream_dynamic_server_upstream_init(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us);
+static ngx_int_t ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us);
+static ngx_int_t ngx_http_upstream_dynamic_server_get_peer(ngx_peer_connection_t *pc, void *data);
+static void ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data, ngx_uint_t state);
 
 static ngx_command_t ngx_http_upstream_dynamic_servers_commands[] = {
     {
@@ -83,7 +105,8 @@ ngx_module_t ngx_http_upstream_dynamic_servers_module = {
 // src/http/ngx_http_upstream.c (nginx version 1.7.7), and should be kept in
 // sync with nginx's source code. Customizations noted in comments.
 // This make possible use the same syntax of nginx comercial version.
-static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy) {
+static char *
+ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy) {
     // BEGIN CUSTOMIZATION: differs from default "server" implementation
     ngx_http_upstream_srv_conf_t                  *uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_dynamic_servers_module);
@@ -200,6 +223,8 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
                 }
 
                 ngx_memzero(dynamic_server, sizeof(ngx_http_upstream_dynamic_server_conf_t));
+                ngx_queue_init(&dynamic_server->pools);
+                dynamic_server->pool = NULL;
                 dynamic_server->server = us;
                 dynamic_server->upstream_conf = uscf;
 
@@ -254,6 +279,10 @@ static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_com
     us->max_fails = max_fails;
     us->fail_timeout = fail_timeout;
 
+    if (dynamic_server) {
+        uscf->peer.init_upstream = ngx_http_upstream_dynamic_server_upstream_init;
+    }
+
     return NGX_CONF_OK;
 
 invalid:
@@ -272,7 +301,8 @@ not_supported:
     return NGX_CONF_ERROR;
 }
 
-static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
+static void *
+ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf;
 
     udsmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_dynamic_server_main_conf_t));
@@ -289,7 +319,8 @@ static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
     return udsmcf;
 }
 
-static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child) {
+static char *
+ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child) {
     // If any dynamic servers are present, verify that a "resolver" is setup as
     // the http level.
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_dynamic_servers_module);
@@ -308,7 +339,8 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
     return NGX_CONF_OK;
 }
 
-static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
+static ngx_int_t
+ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
@@ -329,20 +361,22 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
     return NGX_OK;
 }
 
-static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
-    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
-    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
-    ngx_uint_t i;
-
-    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-        if (dynamic_server[i].pool) {
-            ngx_destroy_pool(dynamic_server[i].pool);
-            dynamic_server[i].pool = NULL;
-        }
-    }
+static void
+ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
+//    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
+//    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
+//    ngx_uint_t i;
+//
+//    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
+//        if (dynamic_server[i].pool) {
+//            ngx_destroy_pool(dynamic_server[i].pool);
+//            dynamic_server[i].pool = NULL;
+//        }
+//    }
 }
 
-static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
+static void
+ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_resolver_ctx_t *ctx;
@@ -372,7 +406,8 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     }
 }
 
-static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx) {
+static void
+ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
     ngx_conf_t cf;
@@ -451,7 +486,7 @@ reinit_upstream:
     ngx_memzero(&cf, sizeof(ngx_conf_t));
     cf.name = "dynamic_server_init_upstream";
     cf.cycle = (ngx_cycle_t *) ngx_cycle;
-    cf.pool = new_pool;
+    cf.pool = ngx_cycle->pool; // TODO check
     cf.module_type = NGX_HTTP_MODULE;
     cf.cmd_type = NGX_HTTP_MAIN_CONF;
     cf.log = ngx_cycle->log;
@@ -496,25 +531,29 @@ reinit_upstream:
         ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: '%V' was resolved to '%V'", &ctx->name, &addr->name);
     }
 
+    if (dynamic_server->pool) {
+        ngx_http_upstream_dynamic_server_info_t *info;
+        if ((info = ngx_pcalloc(dynamic_server->pool, sizeof(*info))) == NULL) {
+            ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error allocating memory to keep track of old DNS entries, skipping update.");
+            ngx_destroy_pool(new_pool);
+            goto end;
+        }
+
+        info->pool = dynamic_server->pool;
+        info->addrs = dynamic_server->server->addrs;
+        info->naddrs = dynamic_server->server->naddrs;
+        ngx_queue_insert_tail(&dynamic_server->pools, &info->queue);
+    }
+
     // If the domain failed to resolve, mark this server as down.
     dynamic_server->server->down = ctx->state ? 1 : 0;
     dynamic_server->server->addrs = addrs;
     dynamic_server->server->naddrs = ctx->naddrs;
+    dynamic_server->pool = new_pool;
 
-    ngx_http_upstream_init_pt init;
-    init = dynamic_server->upstream_conf->peer.init_upstream ? dynamic_server->upstream_conf->peer.init_upstream : ngx_http_upstream_init_round_robin;
-
-    if (init(&cf, dynamic_server->upstream_conf) != NGX_OK) {
+    if (ngx_http_upstream_dynamic_server_upstream_init(&cf, dynamic_server->upstream_conf) != NGX_OK) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error re-initializing upstream after DNS changes");
     }
-
-    if (dynamic_server->previous_pool != NULL) {
-        ngx_destroy_pool(dynamic_server->previous_pool);
-        dynamic_server->previous_pool = NULL;
-    }
-
-    dynamic_server->previous_pool = dynamic_server->pool;
-    dynamic_server->pool = new_pool;
 
 end:
 
@@ -546,7 +585,8 @@ end:
 }
 
 // Copied from src/core/ngx_resolver.c (nginx version 1.7.7).
-static ngx_resolver_node_t * ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str_t *name, uint32_t hash) {
+static ngx_resolver_node_t *
+ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str_t *name, uint32_t hash) {
     ngx_int_t rc;
     ngx_rbtree_node_t *node, *sentinel;
     ngx_resolver_node_t *rn;
@@ -581,4 +621,56 @@ static ngx_resolver_node_t * ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str
     /* not found */
 
     return NULL;
+}
+
+static ngx_int_t
+ngx_http_upstream_dynamic_server_upstream_init(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us) {
+    if (ngx_http_upstream_init_round_robin(cf, us) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    us->peer.init = ngx_http_upstream_dynamic_server_init_peer;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us) {
+    ngx_http_upstream_dynamic_server_peer_data_t    *ahpd;
+
+    ahpd = ngx_palloc(r->pool, sizeof(ngx_http_upstream_dynamic_server_peer_data_t));
+    if (ahpd == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_http_upstream_init_round_robin_peer(r, us) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    ahpd->upstream_srv_conf = us;
+    ahpd->upstream = r->upstream;
+    ahpd->data = r->upstream->peer.data;
+    ahpd->original_get_peer = r->upstream->peer.get;
+    ahpd->original_free_peer = r->upstream->peer.free;
+
+    r->upstream->peer.data = ahpd;
+
+    r->upstream->peer.get = ngx_http_upstream_dynamic_server_get_peer;
+    r->upstream->peer.free = ngx_http_upstream_dynamic_server_free_peer;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_upstream_dynamic_server_get_peer(ngx_peer_connection_t *pc, void *data) {
+    ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
+    return ngx_http_upstream_get_round_robin_peer(pc, ahpd->data);
+}
+
+
+static void
+ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data, ngx_uint_t state) {
+    ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
+    // TODO check ref count to be sure we can release the peer old configuration
+    ngx_http_upstream_free_round_robin_peer(pc, ahpd->data, state);
 }
