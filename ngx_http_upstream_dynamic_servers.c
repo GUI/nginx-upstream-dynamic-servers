@@ -40,6 +40,11 @@ typedef struct {
 
     ngx_event_get_peer_pt           original_get_peer;
     ngx_event_free_peer_pt          original_free_peer;
+
+#if (NGX_HTTP_SSL)
+    ngx_event_set_peer_session_pt      original_set_session;
+    ngx_event_save_peer_session_pt     original_save_session;
+#endif
 } ngx_http_upstream_dynamic_server_peer_data_t;
 
 static ngx_str_t ngx_http_upstream_dynamic_server_null_route = ngx_string("127.255.255.255");
@@ -57,6 +62,11 @@ static ngx_int_t ngx_http_upstream_dynamic_server_upstream_init(ngx_conf_t *cf, 
 static ngx_int_t ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us);
 static ngx_int_t ngx_http_upstream_dynamic_server_get_peer(ngx_peer_connection_t *pc, void *data);
 static void ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data, ngx_uint_t state);
+
+#if (NGX_HTTP_SSL)
+static ngx_int_t ngx_http_upstream_dynamic_set_session(ngx_peer_connection_t *pc, void *data);
+static void ngx_http_upstream_dynamic_save_session(ngx_peer_connection_t *pc, void *data);
+#endif
 
 static ngx_command_t ngx_http_upstream_dynamic_servers_commands[] = {
     {
@@ -654,9 +664,15 @@ ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r, ngx_http_upstr
     ahpd->original_free_peer = r->upstream->peer.free;
 
     r->upstream->peer.data = ahpd;
-
     r->upstream->peer.get = ngx_http_upstream_dynamic_server_get_peer;
     r->upstream->peer.free = ngx_http_upstream_dynamic_server_free_peer;
+
+#if (NGX_HTTP_SSL)
+    ahpd->original_set_session = r->upstream->peer.set_session;
+    ahpd->original_save_session = r->upstream->peer.save_session;
+    r->upstream->peer.set_session = ngx_http_upstream_dynamic_set_session;
+    r->upstream->peer.save_session = ngx_http_upstream_dynamic_save_session;
+#endif
 
     return NGX_OK;
 }
@@ -674,3 +690,24 @@ ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data
     // TODO check ref count to be sure we can release the peer old configuration
     ngx_http_upstream_free_round_robin_peer(pc, ahpd->data, state);
 }
+
+
+#if (NGX_HTTP_SSL)
+
+static ngx_int_t
+ngx_http_upstream_dynamic_set_session(ngx_peer_connection_t *pc, void *data)
+{
+	ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
+    return ahpd->original_set_session(pc, ahpd->data);
+}
+
+
+static void
+ngx_http_upstream_dynamic_save_session(ngx_peer_connection_t *pc, void *data)
+{
+	ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
+	ahpd->original_save_session(pc, ahpd->data);
+    return;
+}
+
+#endif
