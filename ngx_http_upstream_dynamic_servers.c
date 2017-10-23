@@ -8,6 +8,11 @@
         ((u_char *) (n) - offsetof(ngx_resolver_node_t, node))
 
 typedef struct {
+    ngx_http_upstream_init_pt         original_init_upstream;
+    ngx_http_upstream_init_peer_pt    original_init_peer;
+} ngx_http_upstream_dynamic_server_srv_conf_t;
+
+typedef struct {
     ngx_pool_t                   *pool;
     ngx_http_upstream_server_t   *server;
     ngx_http_upstream_srv_conf_t *upstream_conf;
@@ -52,6 +57,7 @@ static ngx_str_t ngx_http_upstream_dynamic_server_null_route = ngx_string("127.2
 static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf);
 
 static char *ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void *ngx_http_upstream_dynamic_servers_create_conf(ngx_conf_t *cf);
 static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle);
 static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle);
@@ -88,7 +94,7 @@ static ngx_http_module_t ngx_http_upstream_dynamic_servers_module_ctx = {
     ngx_http_upstream_dynamic_server_main_conf,   /* create main configuration */
     NULL,                                         /* init main configuration */
 
-    NULL,                                         /* create server configuration */
+    ngx_http_upstream_dynamic_servers_create_conf,/* create server configuration */
     ngx_http_upstream_dynamic_servers_merge_conf, /* merge server configuration */
 
     NULL,                                         /* create location configuration */
@@ -120,6 +126,7 @@ ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, v
     // BEGIN CUSTOMIZATION: differs from default "server" implementation
     ngx_http_upstream_srv_conf_t                  *uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_dynamic_servers_module);
+    ngx_http_upstream_dynamic_server_srv_conf_t   *udsscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = NULL;
     // END CUSTOMIZATION
 
@@ -289,7 +296,10 @@ ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, v
     us->max_fails = max_fails;
     us->fail_timeout = fail_timeout;
 
-    if (dynamic_server) {
+    if (dynamic_server && (udsscf->original_init_upstream == NULL)) {
+        udsscf->original_init_upstream = uscf->peer.init_upstream
+                                        ? uscf->peer.init_upstream
+                                        : ngx_http_upstream_init_round_robin;
         uscf->peer.init_upstream = ngx_http_upstream_dynamic_server_upstream_init;
     }
 
@@ -328,6 +338,20 @@ ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf) {
 
     return udsmcf;
 }
+
+
+static void *
+ngx_http_upstream_dynamic_servers_create_conf(ngx_conf_t *cf) {
+    ngx_http_upstream_dynamic_server_srv_conf_t  *conf;
+
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_dynamic_server_srv_conf_t));
+    if (conf == NULL) {
+        return NULL;
+    }
+
+    return conf;
+}
+
 
 static char *
 ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child) {
@@ -635,9 +659,17 @@ ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str_t *name, uint32_t hash) {
 
 static ngx_int_t
 ngx_http_upstream_dynamic_server_upstream_init(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us) {
-    if (ngx_http_upstream_init_round_robin(cf, us) != NGX_OK) {
+    ngx_http_upstream_dynamic_server_srv_conf_t     *udsscf;
+
+    udsscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_dynamic_servers_module);
+
+    if (udsscf->original_init_upstream(cf, us) != NGX_OK) {
         return NGX_ERROR;
     }
+
+    udsscf->original_init_peer = us->peer.init
+                                  ? us->peer.init
+                                  : ngx_http_upstream_init_round_robin_peer;
 
     us->peer.init = ngx_http_upstream_dynamic_server_init_peer;
 
@@ -647,13 +679,16 @@ ngx_http_upstream_dynamic_server_upstream_init(ngx_conf_t *cf, ngx_http_upstream
 static ngx_int_t
 ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us) {
     ngx_http_upstream_dynamic_server_peer_data_t    *ahpd;
+    ngx_http_upstream_dynamic_server_srv_conf_t     *udsscf;
+
+    udsscf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_dynamic_servers_module);
 
     ahpd = ngx_palloc(r->pool, sizeof(ngx_http_upstream_dynamic_server_peer_data_t));
     if (ahpd == NULL) {
         return NGX_ERROR;
     }
 
-    if (ngx_http_upstream_init_round_robin_peer(r, us) != NGX_OK) {
+    if (udsscf->original_init_peer(r, us) != NGX_OK) {
         return NGX_ERROR;
     }
 
@@ -680,7 +715,7 @@ ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r, ngx_http_upstr
 static ngx_int_t
 ngx_http_upstream_dynamic_server_get_peer(ngx_peer_connection_t *pc, void *data) {
     ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
-    return ngx_http_upstream_get_round_robin_peer(pc, ahpd->data);
+    return ahpd->original_get_peer(pc, ahpd->data);
 }
 
 
@@ -688,7 +723,7 @@ static void
 ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data, ngx_uint_t state) {
     ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
     // TODO check ref count to be sure we can release the peer old configuration
-    ngx_http_upstream_free_round_robin_peer(pc, ahpd->data, state);
+    ahpd->original_free_peer(pc, ahpd->data, state);
 }
 
 
@@ -697,7 +732,7 @@ ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data
 static ngx_int_t
 ngx_http_upstream_dynamic_set_session(ngx_peer_connection_t *pc, void *data)
 {
-	ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
+    ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
     return ahpd->original_set_session(pc, ahpd->data);
 }
 
@@ -705,8 +740,8 @@ ngx_http_upstream_dynamic_set_session(ngx_peer_connection_t *pc, void *data)
 static void
 ngx_http_upstream_dynamic_save_session(ngx_peer_connection_t *pc, void *data)
 {
-	ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
-	ahpd->original_save_session(pc, ahpd->data);
+    ngx_http_upstream_dynamic_server_peer_data_t    *ahpd = data;
+    ahpd->original_save_session(pc, ahpd->data);
     return;
 }
 
