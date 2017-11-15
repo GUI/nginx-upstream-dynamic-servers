@@ -44,6 +44,7 @@ Defines a server for an upstream. The module adds the ability to specify a `reso
 The following parameters can be used (see nginx's [server documentation](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#server) for details):
 
 `weight=number`  
+`max_conns=number`
 `max_fails=number`  
 `fail_timeout=time`  
 `backup`  
@@ -52,7 +53,7 @@ The following parameters can be used (see nginx's [server documentation](http://
 
 # Compatibility
 
-Tested with nginx 1.6, 1.7, 1.8, 1.9.
+Tested with nginx 1.6, 1.7, 1.8, 1.9, 1.11.
 
 ## Alternatives
 
