@@ -2,11 +2,11 @@ export PATH := $(PWD)/t/build/sbin:$(PWD)/t/build/bin:$(PATH)
 export PERL5LIB := $(PWD)/t/build/lib/perl5
 export UNBOUND_PID := $(PWD)/t/build/etc/unbound/unbound.pid
 
-unbound_version=1.4.22
-lua_jit_version=2.0.3
-lua_nginx_module_version=0.10.8
-lua_upstream_nginx_module_version=0.02
-nginx_version=1.10.0
+unbound_version=1.6.7
+lua_jit_version=2.1.0-beta3
+lua_nginx_module_version=0.10.11
+lua_upstream_nginx_module_version=0.07
+nginx_version=1.13.6
 nginx_no_pool_version=1.9.15
 nginx_url=http://nginx.org/download/nginx-$(nginx_version).tar.gz
 
@@ -108,7 +108,7 @@ t/tmp/nginx-$(nginx_version)/.patches-applied: | t/tmp/nginx-$(nginx_version) t/
 t/tmp/nginx-$(nginx_version)/Makefile: config | t/tmp/nginx-$(nginx_version) t/tmp/nginx-$(nginx_version)/.patches-applied t/build/bin/luajit t/tmp/lua-nginx-module-$(lua_nginx_module_version) t/tmp/lua-upstream-nginx-module-$(lua_upstream_nginx_module_version)
 	cd t/tmp/nginx-$(nginx_version) && env \
 		LUAJIT_LIB=$(PWD)/t/build/lib \
-		LUAJIT_INC=$(PWD)/t/build/include/luajit-2.0 \
+		LUAJIT_INC=$(PWD)/t/build/include/luajit-2.1 \
 		./configure \
 		--prefix=$(PWD)/t/build \
 		--with-debug \
@@ -116,6 +116,8 @@ t/tmp/nginx-$(nginx_version)/Makefile: config | t/tmp/nginx-$(nginx_version) t/t
 		--add-module=$(PWD)/t/tmp/lua-nginx-module-$(lua_nginx_module_version) \
 		--add-module=$(PWD)/t/tmp/lua-upstream-nginx-module-$(lua_upstream_nginx_module_version) \
 		--add-module=$(PWD) \
+		--with-stream \
+		--with-stream_ssl_module \
 		--without-http_charset_module \
 		--without-http_userid_module \
 		--without-http_auth_basic_module \

@@ -376,6 +376,10 @@ ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void 
 static ngx_int_t
 ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
+    if(udsmcf == NULL) {
+        return NGX_OK;
+    }
+
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
     ngx_event_t *timer;
