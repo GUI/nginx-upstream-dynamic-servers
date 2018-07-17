@@ -7,14 +7,23 @@
     (ngx_resolver_node_t *)                                                  \
         ((u_char *) (n) - offsetof(ngx_resolver_node_t, node))
 
+/*
+ * structure to reference count the dynamic_server's pool
+ */
+typedef struct {
+    ngx_int_t   count;
+    ngx_pool_t *pool;
+} pool_reference_ctx_t;
+
 typedef struct {
     ngx_pool_t                   *pool;
-    ngx_pool_t                   *previous_pool;
     ngx_http_upstream_server_t   *server;
     ngx_http_upstream_srv_conf_t *upstream_conf;
     ngx_str_t                     host;
     in_port_t                     port;
     ngx_event_t                   timer;
+    pool_reference_ctx_t         *pool_reference_ctx;
+    ngx_int_t (*old_init) (ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us);
 } ngx_http_upstream_dynamic_server_conf_t;
 
 typedef struct {
@@ -77,6 +86,35 @@ ngx_module_t ngx_http_upstream_dynamic_servers_module = {
     NULL,                                           /* exit master */
     NGX_MODULE_V1_PADDING
 };
+
+/**
+ * find the dynamic server attached to the upstream configuration.
+ * Todo:  Use a tree or hash table to look up dynamic servers.
+ */
+static ngx_http_upstream_dynamic_server_conf_t * find_dynamic_server(ngx_http_upstream_srv_conf_t *us) {
+    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
+    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
+    ngx_uint_t i;
+
+    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
+        if (dynamic_server[i].upstream_conf == us) {
+            return &dynamic_server[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Decrement the reference count on a pool and destroy it if all references are gone.
+ */
+static void ngx_http_upstream_dynamic_server_request_pool_destroyed(void * data) {
+    pool_reference_ctx_t * ctx = data;
+    ctx->count--;
+    if (ctx->count == 0) {
+        ngx_destroy_pool(ctx->pool);
+    }
+}
+
 
 // Overwrite the nginx "server" directive based on its
 // implementation of "ngx_http_upstream_server" from
@@ -351,9 +389,11 @@ static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
     ngx_uint_t i;
 
     for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-        if (dynamic_server[i].pool) {
-            ngx_destroy_pool(dynamic_server[i].pool);
+        if (dynamic_server[i].pool_reference_ctx) {
+            ngx_http_upstream_dynamic_server_request_pool_destroyed(dynamic_server[i].pool_reference_ctx);
             dynamic_server[i].pool = NULL;
+            dynamic_server[i].pool_reference_ctx = NULL;
+
         }
     }
 }
@@ -388,6 +428,23 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     }
 }
 
+/**
+ *  initializes the upstream on each request
+ *
+ *  call the parent function and establish a reference count on the
+ *  dynamic server's pool
+ */
+static ngx_int_t
+ngx_http_upstream_dynamic_server_init(ngx_http_request_t *r,
+    ngx_http_upstream_srv_conf_t *us) {
+    ngx_http_upstream_dynamic_server_conf_t *dynamic_server = find_dynamic_server(us);
+    ngx_pool_cleanup_t * cleanup_cbk = ngx_pool_cleanup_add(r->pool, 0);
+    cleanup_cbk->data = dynamic_server->pool_reference_ctx;
+    cleanup_cbk->handler = ngx_http_upstream_dynamic_server_request_pool_destroyed;
+    dynamic_server->pool_reference_ctx->count++;
+    return dynamic_server->old_init(r,us);
+}
+
 static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
@@ -395,7 +452,7 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
     uint32_t hash;
     ngx_resolver_node_t  *rn;
     ngx_pool_t *new_pool;
-    ngx_addr_t                      *addrs;
+    ngx_addr_t *addrs;
 
     dynamic_server = ctx->data;
 
@@ -524,12 +581,20 @@ reinit_upstream:
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error re-initializing upstream after DNS changes");
     }
 
-    if (dynamic_server->previous_pool != NULL) {
-        ngx_destroy_pool(dynamic_server->previous_pool);
-        dynamic_server->previous_pool = NULL;
+    // dynamic_server->upstream_conf is initialized in init_upstream. override it so we can reference count connections
+    // with our pool
+    dynamic_server->old_init = dynamic_server->upstream_conf->peer.init;
+    dynamic_server->upstream_conf->peer.init = ngx_http_upstream_dynamic_server_init;
+
+    // if there was an old pool, release our reference.
+    if (dynamic_server->pool_reference_ctx) {
+        ngx_http_upstream_dynamic_server_request_pool_destroyed(dynamic_server->pool_reference_ctx);
     }
 
-    dynamic_server->previous_pool = dynamic_server->pool;
+    // set up the reference counting on the pool. Give ourselves a reference.
+    dynamic_server->pool_reference_ctx = ngx_pcalloc(new_pool, sizeof(pool_reference_ctx_t));
+    dynamic_server->pool_reference_ctx->count = 1;
+    dynamic_server->pool_reference_ctx->pool = new_pool;
     dynamic_server->pool = new_pool;
 
 end:
@@ -598,3 +663,4 @@ static ngx_resolver_node_t * ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str
 
     return NULL;
 }
+
