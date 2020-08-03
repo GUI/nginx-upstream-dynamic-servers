@@ -7,7 +7,17 @@
     (ngx_resolver_node_t *)                                                  \
         ((u_char *) (n) - offsetof(ngx_resolver_node_t, node))
 
+typedef struct
+{
+    ngx_queue_t queue;
+    ngx_pool_t *pool;
+    ngx_uint_t refer_num;               /* to count the upstream that refers this memory pool*/
+} ngx_http_upstream_dynamic_server_pool_node_t;
+
 typedef struct {
+    ngx_http_upstream_dynamic_server_pool_node_t *cur_node;     /* the newest memory pool */
+    ngx_queue_t                   pool_queue;                   /* queue of ngx_http_upstream_dynamic_server_pool_node_t */
+    ngx_uint_t                    pool_queue_len;
     ngx_pool_t                   *pool;
     ngx_pool_t                   *previous_pool;
     ngx_http_upstream_server_t   *server;
@@ -15,6 +25,7 @@ typedef struct {
     ngx_str_t                     host;
     in_port_t                     port;
     ngx_event_t                   timer;
+    ngx_http_upstream_init_peer_pt old_init;
 } ngx_http_upstream_dynamic_server_conf_t;
 
 typedef struct {
@@ -31,10 +42,15 @@ static void *ngx_http_upstream_dynamic_server_main_conf(ngx_conf_t *cf);
 static char *ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle);
-static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle);
 static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev);
 static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx);
 static ngx_resolver_node_t *ngx_resolver_lookup_name(ngx_resolver_t *r, ngx_str_t *name, uint32_t hash);
+
+static ngx_http_upstream_dynamic_server_conf_t *find_dynamic_server(ngx_http_upstream_srv_conf_t *us);
+static void ngx_http_upstream_dynamic_servers_clean_up(void *data);
+static ngx_int_t
+ngx_http_upstream_dynamic_server_init(ngx_http_request_t *r,
+                                              ngx_http_upstream_srv_conf_t *us);
 
 static ngx_command_t ngx_http_upstream_dynamic_servers_commands[] = {
     {
@@ -73,10 +89,45 @@ ngx_module_t ngx_http_upstream_dynamic_servers_module = {
     ngx_http_upstream_dynamic_servers_init_process, /* init process */
     NULL,                                           /* init thread */
     NULL,                                           /* exit thread */
-    ngx_http_upstream_dynamic_servers_exit_process, /* exit process */
+    NULL, /* exit process */
     NULL,                                           /* exit master */
     NGX_MODULE_V1_PADDING
 };
+
+static ngx_http_upstream_dynamic_server_conf_t *find_dynamic_server(ngx_http_upstream_srv_conf_t *us)
+{
+    ngx_http_upstream_dynamic_server_main_conf_t *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
+    ngx_http_upstream_dynamic_server_conf_t *dynamic_server = udsmcf->dynamic_servers.elts;
+    ngx_uint_t i;
+
+    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++)
+    {
+        if (dynamic_server[i].upstream_conf == us)
+        /* find the first dynamic_server who's upstream_conf equal to us if you have more resolve option in one upstream, pool queue only use in this dynamic_server because all those dynamic_server share one us */
+        {
+            return &dynamic_server[i];
+        }
+    }
+    return NULL;
+}
+
+static void ngx_http_upstream_dynamic_servers_clean_up(void *data)
+{
+    ngx_http_upstream_dynamic_server_pool_node_t *node = data;
+    node->refer_num--;
+}
+
+static ngx_int_t
+ngx_http_upstream_dynamic_server_init(ngx_http_request_t *r,
+                                              ngx_http_upstream_srv_conf_t *us)
+{
+    ngx_http_upstream_dynamic_server_conf_t *dynamic_server = find_dynamic_server(us);
+    ngx_pool_cleanup_t *cleanup = ngx_pool_cleanup_add(r->pool, 0);
+    cleanup->data = dynamic_server->cur_node;
+    cleanup->handler = ngx_http_upstream_dynamic_servers_clean_up;
+    dynamic_server->cur_node->refer_num++;
+    return dynamic_server->old_init(r, us);
+}
 
 // Overwrite the nginx "server" directive based on its
 // implementation of "ngx_http_upstream_server" from
@@ -325,6 +376,7 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
 }
 
 static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
+    /* it seems that we do not need the exit process because it will generate new processes the replace the old old processes any way so we may not care about the memory should free or not*/
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
@@ -332,11 +384,12 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
     ngx_uint_t refresh_in;
 
     for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
+        ngx_queue_init(&dynamic_server[i].pool_queue);
         timer = &dynamic_server[i].timer;
         timer->handler = ngx_http_upstream_dynamic_server_resolve;
         timer->log = cycle->log;
         timer->data = &dynamic_server[i];
-
+        dynamic_server[i].old_init = dynamic_server[i].upstream_conf->peer.init;
         refresh_in = ngx_random() % 1000;
         ngx_log_debug(NGX_LOG_DEBUG_CORE, cycle->log, 0, "upstream-dynamic-servers: Initial DNS refresh of '%V' in %ims", &dynamic_server[i].host, refresh_in);
         ngx_add_timer(timer, refresh_in);
@@ -345,18 +398,6 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
     return NGX_OK;
 }
 
-static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
-    ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
-    ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
-    ngx_uint_t i;
-
-    for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-        if (dynamic_server[i].pool) {
-            ngx_destroy_pool(dynamic_server[i].pool);
-            dynamic_server[i].pool = NULL;
-        }
-    }
-}
 
 static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
@@ -391,12 +432,15 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
 static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(ngx_cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server;
+    ngx_http_upstream_dynamic_server_conf_t *_dynamic_server;
     ngx_conf_t cf;
     uint32_t hash;
     ngx_resolver_node_t  *rn;
     ngx_pool_t *new_pool;
     ngx_addr_t                      *addrs;
-
+    ngx_http_upstream_dynamic_server_pool_node_t *pool_node, *tmp_node;
+    ngx_queue_t *p, *n, *pool_queue;
+    ngx_uint_t index = 0;
     dynamic_server = ctx->data;
 
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: Finished resolving '%V'", &ctx->name);
@@ -462,6 +506,17 @@ reinit_upstream:
         goto end;
     }
 
+    pool_node = ngx_palloc(
+        new_pool, sizeof(ngx_http_upstream_dynamic_server_pool_node_t));
+    if (pool_node == NULL)
+    {
+        ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0,
+                      "upstream-dynamic-servers: Could not create pool_node");
+        goto end;
+    }
+    pool_node->pool = new_pool;
+    pool_node->refer_num = 0;
+
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: DNS changes for '%V' detected - reinitializing upstream configuration", &ctx->name);
 
     ngx_memzero(&cf, sizeof(ngx_conf_t));
@@ -517,21 +572,45 @@ reinit_upstream:
     dynamic_server->server->addrs = addrs;
     dynamic_server->server->naddrs = ctx->naddrs;
 
-    ngx_http_upstream_init_pt init;
-    init = dynamic_server->upstream_conf->peer.init_upstream ? dynamic_server->upstream_conf->peer.init_upstream : ngx_http_upstream_init_round_robin;
-
-    if (init(&cf, dynamic_server->upstream_conf) != NGX_OK) {
+    /* if you read the native code you can find out that all you need to do here is ngx_http_upstream_init_round_robin if you don't use other third party modules in the init process,
+        otherwise it may cause memory problem if you use keepalive in the upstream block (it reinitialize the keepalive queue, when remote close the connection 2 TTL later, it will crash)
+    */
+    if (ngx_http_upstream_init_round_robin(&cf, dynamic_server->upstream_conf) != NGX_OK) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error re-initializing upstream after DNS changes");
     }
 
-    if (dynamic_server->previous_pool != NULL) {
-        ngx_destroy_pool(dynamic_server->previous_pool);
-        dynamic_server->previous_pool = NULL;
+    dynamic_server->upstream_conf->peer.init = ngx_http_upstream_dynamic_server_init;
+    _dynamic_server = find_dynamic_server(dynamic_server->upstream_conf);
+    pool_queue = &_dynamic_server->pool_queue;
+
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ngx_cycle->log, 0,
+                  "upstream-dynamic-servers: upstream host '%V' pool_queue_len is %i "
+                  "before insert",
+                  &_dynamic_server->upstream_conf->host, _dynamic_server->pool_queue_len);
+
+    for (p = pool_queue->next, n = p->next; p != pool_queue;
+         p = n, n = n->next)
+    {
+        index++;
+        tmp_node = ngx_queue_data(
+            p, ngx_http_upstream_dynamic_server_pool_node_t, queue);
+        if (tmp_node->refer_num == 0)
+        {
+            ngx_queue_remove(p);
+
+            ngx_log_debug(NGX_LOG_DEBUG_CORE, ngx_cycle->log, 0,
+                          "upstream-dynamic-servers: upstream host '%V' %ith pool "
+                          "will be destoried",
+                          &_dynamic_server->upstream_conf->host, index);
+
+            ngx_destroy_pool(tmp_node->pool);
+            _dynamic_server->pool_queue_len--;
+        }
     }
 
-    dynamic_server->previous_pool = dynamic_server->pool;
-    dynamic_server->pool = new_pool;
-
+    ngx_queue_insert_tail(pool_queue, &pool_node->queue);
+    _dynamic_server->cur_node = pool_node;
+    _dynamic_server->pool_queue_len++;
 end:
 
     if (ctx->resolver->log->log_level & NGX_LOG_DEBUG_CORE) {
