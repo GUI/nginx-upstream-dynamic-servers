@@ -1,7 +1,18 @@
+/**
+ *
+ * Dynamic upstream resolution for round-robin clients.
+ *
+ * Note:  This only works with 'round robin' and keepalive upstream modules!
+ *
+ *
+ */
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <nginx.h>
+
+
+/********************* dynamic server  *************************/
 
 #define ngx_resolver_node(n)                                                 \
     (ngx_resolver_node_t *)                                                  \
@@ -9,29 +20,47 @@
 
 /*
  * structure to reference count the dynamic_server's pool
+ * this is the per - dns lookup structure
  */
 typedef struct {
-    ngx_int_t   count;
-    ngx_pool_t *pool;
-} pool_reference_ctx_t;
+    ngx_pool_t                    *pool;
+    ngx_int_t                     ref_count;
+    ngx_http_upstream_rr_peers_t  *peers;
+} ngx_http_upstream_dynamic_server_resolution_t;
 
+
+// dynamic_server_conf
+// describes each dynamic server
 typedef struct {
-    ngx_pool_t                   *pool;
-    ngx_http_upstream_server_t   *server;
-    ngx_http_upstream_srv_conf_t *upstream_conf;
-    ngx_str_t                     host;
-    in_port_t                     port;
-    ngx_event_t                   timer;
-    pool_reference_ctx_t         *pool_reference_ctx;
-    ngx_int_t (*old_init) (ngx_http_request_t *r, ngx_http_upstream_srv_conf_t *us);
+    ngx_http_upstream_server_t    *server;
+    ngx_http_upstream_srv_conf_t  *upstream_conf;
+    ngx_str_t                      host;
+    in_port_t                      port;
+    ngx_event_t                    timer;
+    ngx_http_upstream_init_peer_pt old_init_peer;
+    ngx_http_upstream_dynamic_server_resolution_t * current_resolution;
 } ngx_http_upstream_dynamic_server_conf_t;
 
+// main conf,
+// describes all fo the dynamic servers.
 typedef struct {
     ngx_resolver_t               *resolver;
     ngx_msec_t                    resolver_timeout;
     ngx_array_t                   dynamic_servers;
     ngx_http_conf_ctx_t          *conf_ctx;
 } ngx_http_upstream_dynamic_server_main_conf_t;
+
+/* data structure for peer connection override state */
+typedef struct {
+    ngx_event_get_peer_pt            get;
+    ngx_event_free_peer_pt           free;
+    ngx_event_notify_peer_pt         notify;
+#if (NGX_SSL || NGX_COMPAT)
+    ngx_event_set_peer_session_pt    set_session;
+    ngx_event_save_peer_session_pt   save_session;
+#endif
+    void                            *data;
+} dynamic_server_peer_data_t;
 
 static ngx_str_t ngx_http_upstream_dynamic_server_null_route = ngx_string("127.255.255.255");
 
@@ -82,7 +111,7 @@ ngx_module_t ngx_http_upstream_dynamic_servers_module = {
     ngx_http_upstream_dynamic_servers_init_process, /* init process */
     NULL,                                           /* init thread */
     NULL,                                           /* exit thread */
-    ngx_http_upstream_dynamic_servers_exit_process, /* exit process */
+	ngx_http_upstream_dynamic_servers_exit_process, /* exit process */
     NULL,                                           /* exit master */
     NGX_MODULE_V1_PADDING
 };
@@ -104,23 +133,12 @@ static ngx_http_upstream_dynamic_server_conf_t * find_dynamic_server(ngx_http_up
     return NULL;
 }
 
-/**
- * Decrement the reference count on a pool and destroy it if all references are gone.
- */
-static void ngx_http_upstream_dynamic_server_request_pool_destroyed(void * data) {
-    pool_reference_ctx_t * ctx = data;
-    ctx->count--;
-    if (ctx->count == 0) {
-        ngx_destroy_pool(ctx->pool);
-    }
-}
-
 
 // Overwrite the nginx "server" directive based on its
 // implementation of "ngx_http_upstream_server" from
 // src/http/ngx_http_upstream.c (nginx version 1.7.7), and should be kept in
 // sync with nginx's source code. Customizations noted in comments.
-// This make possible use the same syntax of nginx comercial version.
+// This make possible use the same syntax of nginx commercial version.
 static char * ngx_http_upstream_dynamic_server_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy) {
     // BEGIN CUSTOMIZATION: differs from default "server" implementation
     ngx_http_upstream_srv_conf_t                  *uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
@@ -383,17 +401,55 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
     return NGX_OK;
 }
 
+void free_dynamic_server_resolution(ngx_http_upstream_dynamic_server_resolution_t * dsr) {
+	// the round robin peer does not free its saved ssl_sessions.
+	// this is ok in nginx, because the peers are program lifetime.
+	// it's not ok for us, because we free and reallocate the peers.
+	// there is no destructor to call in the round-robin peers
+	// so we have to do it ourselves, now that no-one is referencing the
+	// old set of peers.
+
+#if (NGX_SSL || NGX_COMPAT)
+	ngx_http_upstream_rr_peers_t  *peers = dsr->peers;
+
+	if (peers) {
+		ngx_http_upstream_rr_peer_t  *peer;
+
+		for (peer = peers->peer;
+			 peer;
+			 peer = peer->next)
+		{
+				if (peer->ssl_session) {
+					 ngx_ssl_free_session(peer->ssl_session);
+					 peer->ssl_session = NULL;
+				}
+		}
+	}
+#endif
+
+
+    // no more references to this resolution - now we can free.
+	ngx_destroy_pool(dsr->pool);
+}
+
+
+void dereference_dynamic_server_resolution(void * data) {
+	ngx_http_upstream_dynamic_server_resolution_t * dsr = data;
+	dsr->ref_count -= 1;
+	if (!dsr->ref_count) {
+		free_dynamic_server_resolution(dsr);
+	}
+}
+
 static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
 
     for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
-        if (dynamic_server[i].pool_reference_ctx) {
-            ngx_http_upstream_dynamic_server_request_pool_destroyed(dynamic_server[i].pool_reference_ctx);
-            dynamic_server[i].pool = NULL;
-            dynamic_server[i].pool_reference_ctx = NULL;
-
+        if (dynamic_server[i].current_resolution) {
+        	free_dynamic_server_resolution(dynamic_server[i].current_resolution);
+            dynamic_server[i].current_resolution = NULL;
         }
     }
 }
@@ -421,28 +477,101 @@ static void ngx_http_upstream_dynamic_server_resolve(ngx_event_t *ev) {
     ctx->data = dynamic_server;
     ctx->timeout = udsmcf->resolver_timeout;
 
-    ngx_log_debug(NGX_LOG_DEBUG_CORE, ev->log, 0, "upstream-dynamic-servers: Resolving '%V'", &ctx->name);
+    ngx_log_debug(NGX_LOG_DEBUG_CORE, ev->log, 0, "upstream-dynamic-servers: Resolving '%V'", &dynamic_server->host);
     if (ngx_resolve_name(ctx) != NGX_OK) {
-        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: ngx_resolve_name failed for '%V'", &ctx->name);
+        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "upstream-dynamic-servers: ngx_resolve_name failed for '%V'", &dynamic_server->host);
         ngx_add_timer(&dynamic_server->timer, 1000);
     }
 }
+
+/* peer connection class overrides */
+
+static ngx_int_t
+ngx_http_upstream_dynamic_server_get_peer(ngx_peer_connection_t *pc, void *data)
+{
+	dynamic_server_peer_data_t * d = data;
+	return d->get(pc,d->data);
+}
+
+
+static void
+ngx_http_upstream_dynamic_server_free_peer(ngx_peer_connection_t *pc, void *data, ngx_uint_t state) {
+	dynamic_server_peer_data_t * d = data;
+	if (d->free) {
+		d->free(pc,d->data,state);
+	}
+}
+
+static void ngx_http_upstream_dynamic_server_notify_peer(ngx_peer_connection_t *pc, void *data, ngx_uint_t type) {
+	dynamic_server_peer_data_t * d = data;
+	d->notify(pc, d->data,type);
+}
+
+#if (NGX_SSL || NGX_COMPAT)
+static ngx_int_t ngx_http_upstream_dynamic_server_set_peer_session(ngx_peer_connection_t *pc, void *data) {
+	dynamic_server_peer_data_t * d = data;
+	return d->set_session(pc, d->data);
+}
+
+static void ngx_http_upstream_dynamic_server_save_peer_session(ngx_peer_connection_t *pc, void *data) {
+	dynamic_server_peer_data_t * d = data;
+	d->save_session(pc, d->data);
+}
+#endif
+
 
 /**
  *  initializes the upstream on each request
  *
  *  call the parent function and establish a reference count on the
- *  dynamic server's pool
+ *  dynamic server's pool to the nginx connection;
  */
 static ngx_int_t
-ngx_http_upstream_dynamic_server_init(ngx_http_request_t *r,
+ngx_http_upstream_dynamic_server_init_peer(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *us) {
     ngx_http_upstream_dynamic_server_conf_t *dynamic_server = find_dynamic_server(us);
-    ngx_pool_cleanup_t * cleanup_cbk = ngx_pool_cleanup_add(r->pool, 0);
-    cleanup_cbk->data = dynamic_server->pool_reference_ctx;
-    cleanup_cbk->handler = ngx_http_upstream_dynamic_server_request_pool_destroyed;
-    dynamic_server->pool_reference_ctx->count++;
-    return dynamic_server->old_init(r,us);
+    ngx_int_t rc;
+    dynamic_server_peer_data_t * new_data;
+    ngx_pool_cleanup_t * cln;
+
+    if (r->upstream->peer.data) {
+    	new_data = (dynamic_server_peer_data_t *)r->upstream->peer.data;
+    	r->upstream->peer.data = new_data->data;
+    } else {
+    	new_data = ngx_pcalloc(r->pool, sizeof(dynamic_server_peer_data_t));
+    }
+
+    //call the parent's initialize function to construct the peer/initialize
+    rc =  dynamic_server->old_init_peer(r, us);
+
+    // add a reference to the current resolution
+    dynamic_server->current_resolution->ref_count += 1;
+    cln = ngx_pool_cleanup_add(r->pool, 0);
+    cln->handler = dereference_dynamic_server_resolution;
+    cln->data = dynamic_server->current_resolution;
+
+    // intercept the function/data pointer on the peer for chaining
+    new_data->data           = r->upstream->peer.data;
+    new_data->get            = r->upstream->peer.get;
+    new_data->free           = r->upstream->peer.free;
+    new_data->notify         = r->upstream->peer.notify;
+#if (NGX_SSL || NGX_COMPAT)
+    new_data->set_session  = r->upstream->peer.set_session;
+    new_data->save_session = r->upstream->peer.save_session;
+#endif
+
+
+    r->upstream->peer.data = new_data;
+    r->upstream->peer.get  = new_data->get ? ngx_http_upstream_dynamic_server_get_peer : NULL;
+    r->upstream->peer.free = ngx_http_upstream_dynamic_server_free_peer;
+    r->upstream->peer.notify = new_data->notify ? ngx_http_upstream_dynamic_server_notify_peer: NULL;
+#if (NGX_SSL || NGX_COMPAT)
+    r->upstream->peer.set_session = new_data->set_session ? ngx_http_upstream_dynamic_server_set_peer_session: NULL;
+    r->upstream->peer.save_session = new_data->save_session ? ngx_http_upstream_dynamic_server_save_peer_session: NULL;
+#endif
+
+    return rc;
+
 }
 
 static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t *ctx) {
@@ -508,8 +637,12 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
         }
     }
 
+// comment this out to force
+// rebuilding the server list every scan. 
+#if 1
     ngx_log_debug(NGX_LOG_DEBUG_CORE, ctx->resolver->log, 0, "upstream-dynamic-servers: No DNS changes for '%V' - keeping existing upstream configuration", &ctx->name);
     goto end;
+#endif
 
 reinit_upstream:
 
@@ -574,28 +707,35 @@ reinit_upstream:
     dynamic_server->server->addrs = addrs;
     dynamic_server->server->naddrs = ctx->naddrs;
 
-    ngx_http_upstream_init_pt init;
-    init = dynamic_server->upstream_conf->peer.init_upstream ? dynamic_server->upstream_conf->peer.init_upstream : ngx_http_upstream_init_round_robin;
+    //
+    if (dynamic_server->upstream_conf->peer.init != ngx_http_upstream_dynamic_server_init_peer) {
+        dynamic_server->old_init_peer = dynamic_server->upstream_conf->peer.init;
+    }
 
-    if (init(&cf, dynamic_server->upstream_conf) != NGX_OK) {
+    // Round robin initialization initializes the peers from the servers.
+    // other initialization functions that use the server block include the zone and hash functions.
+    // we do not want to initialize the entire chain.
+    // We can not call ngx_http_upstream_init_keepalive. This would reinit the keepalive queues.
+    if (ngx_http_upstream_init_round_robin(&cf, dynamic_server->upstream_conf) != NGX_OK) {
         ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0, "upstream-dynamic-servers: Error re-initializing upstream after DNS changes");
     }
 
-    // dynamic_server->upstream_conf is initialized in init_upstream. override it so we can reference count connections
-    // with our pool
-    dynamic_server->old_init = dynamic_server->upstream_conf->peer.init;
-    dynamic_server->upstream_conf->peer.init = ngx_http_upstream_dynamic_server_init;
+    // Clean up unwanted round robin initialization artifacts. we only want to reinitialize the peer list.
+    dynamic_server->upstream_conf->peer.init = ngx_http_upstream_dynamic_server_init_peer;
 
-    // if there was an old pool, release our reference.
-    if (dynamic_server->pool_reference_ctx) {
-        ngx_http_upstream_dynamic_server_request_pool_destroyed(dynamic_server->pool_reference_ctx);
+    // set up reference counting so we can extend the life of this pool 
+    // if other memory pools (connections/requests) reference this one
+    // (via the peer structure)
+
+    if (dynamic_server->current_resolution) {
+    	dereference_dynamic_server_resolution(dynamic_server->current_resolution);
     }
 
-    // set up the reference counting on the pool. Give ourselves a reference.
-    dynamic_server->pool_reference_ctx = ngx_pcalloc(new_pool, sizeof(pool_reference_ctx_t));
-    dynamic_server->pool_reference_ctx->count = 1;
-    dynamic_server->pool_reference_ctx->pool = new_pool;
-    dynamic_server->pool = new_pool;
+    dynamic_server->current_resolution = ngx_palloc(new_pool, sizeof(ngx_http_upstream_dynamic_server_resolution_t));
+    dynamic_server->current_resolution->pool = new_pool;
+    dynamic_server->current_resolution->peers = dynamic_server->upstream_conf->peer.data;
+    dynamic_server->current_resolution->ref_count = 1;
+
 
 end:
 
